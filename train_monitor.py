@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Hot Axle Monitoring System - Raspberry Pi Controller
-Displays train as linked list with real-time temperature monitoring
+Hot Axle Monitoring System - Raspberry Pi Controller (REVISED)
+Robust error handling and binary communication
 """
 
 import serial
@@ -9,6 +9,7 @@ import time
 import tkinter as tk
 from tkinter import ttk
 import threading
+import sys
 
 class CoachNode:
     """Represents a coach in the linked list"""
@@ -21,308 +22,487 @@ class CoachNode:
 
 class TrainMonitor:
     def __init__(self, port='/dev/ttyUSB0', baudrate=9600):
-        # Serial connection to Gateway Arduino
         self.serial_port = None
         self.port = port
         self.baudrate = baudrate
         
-        # Train data structures
-        self.coaches = {}  # Dictionary to store all coach nodes
-        self.head = None   # Head of linked list (first coach)
-        self.train_order = []  # Ordered list of coach IDs
+        self.coaches = {}
+        self.head = None
+        self.train_order = []
         
-        # GUI
         self.root = None
         self.canvas = None
         self.status_label = None
         
-        # Control
         self.running = False
         self.mapped = False
         
     def connect(self):
-        """Connect to Arduino gateway via USB"""
+        """Connect to Arduino gateway"""
         try:
-            self.serial_port = serial.Serial(self.port, self.baudrate, timeout=2)
-            time.sleep(2)  # Wait for Arduino to reset
+            print(f"Connecting to {self.port}...")
+            self.serial_port = serial.Serial(
+                self.port, 
+                self.baudrate, 
+                timeout=3,
+                write_timeout=3
+            )
+            time.sleep(3)  # Wait for Arduino reset
+            
+            # Flush buffers
+            self.serial_port.reset_input_buffer()
+            self.serial_port.reset_output_buffer()
             
             # Wait for READY signal
+            print("Waiting for READY signal...")
             start_time = time.time()
-            while time.time() - start_time < 10:
+            ready_found = False
+            
+            while time.time() - start_time < 15:
                 if self.serial_port.in_waiting:
-                    line = self.serial_port.readline().decode().strip()
-                    if line == "READY":
-                        print("✓ Gateway connected and ready")
-                        return True
+                    try:
+                        line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+                        print(f"  Received: '{line}'")
+                        if line == "READY":
+                            ready_found = True
+                            break
+                    except Exception as e:
+                        print(f"  Read error: {e}")
+                time.sleep(0.1)
             
-            print("✗ Gateway did not send READY signal")
+            if ready_found:
+                print("✓ Gateway connected and ready\n")
+                return True
+            else:
+                print("✗ Gateway did not send READY signal\n")
+                return False
+            
+        except serial.SerialException as e:
+            print(f"✗ Serial connection failed: {e}")
+            print(f"  Try: sudo chmod 666 {self.port}")
             return False
-            
         except Exception as e:
             print(f"✗ Connection failed: {e}")
             return False
     
     def send_command(self, command):
-        """Send command to Arduino and get response"""
-        try:
-            self.serial_port.write(f"{command}\n".encode())
-            time.sleep(0.3)  # Wait for processing
-            
-            if self.serial_port.in_waiting:
-                response = self.serial_port.readline().decode().strip()
-                return response
-            return None
-            
-        except Exception as e:
-            print(f"Error sending command: {e}")
-            return None
+        """Send command and get response with robust error handling"""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                # Flush buffers
+                self.serial_port.reset_input_buffer()
+                self.serial_port.reset_output_buffer()
+                
+                # Send command
+                cmd_bytes = f"{command}\n".encode('utf-8')
+                self.serial_port.write(cmd_bytes)
+                self.serial_port.flush()
+                
+                # Wait for response
+                time.sleep(0.4)
+                
+                if self.serial_port.in_waiting:
+                    # Read response with error handling
+                    response = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+                    
+                    if response and response != "ERROR":
+                        return response
+                    elif response == "ERROR":
+                        if attempt < max_retries - 1:
+                            print(f"  Retry {attempt + 1}/{max_retries} for: {command}")
+                            time.sleep(0.2)
+                            continue
+                        return None
+                else:
+                    if attempt < max_retries - 1:
+                        print(f"  No response, retry {attempt + 1}/{max_retries} for: {command}")
+                        time.sleep(0.2)
+                        continue
+                    return None
+                    
+            except UnicodeDecodeError as e:
+                print(f"  Decode error on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(0.2)
+                    continue
+                return None
+            except Exception as e:
+                print(f"  Error sending command: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(0.2)
+                    continue
+                return None
+        
+        return None
     
     def discover_train(self):
-        """Phase 1: Discover all coaches and build map"""
-        print("\n🔍 Discovering train topology...")
+        """Discover all coaches and build map"""
+        print("=" * 60)
+        print("🔍 DISCOVERING TRAIN TOPOLOGY")
+        print("=" * 60)
         
         # Request map bundles from coaches 0-3
         for coach_id in range(4):
+            print(f"\n📡 Requesting map from Coach {coach_id}...")
             response = self.send_command(f"MAP,{coach_id}")
             
             if response and response != "ERROR":
-                parts = response.split(',')
-                if len(parts) == 3:
-                    left_id = int(parts[0])
-                    current_id = int(parts[1])
-                    right_id = int(parts[2])
+                try:
+                    parts = response.split(',')
                     
-                    # Create coach node
-                    node = CoachNode(current_id, left_id, right_id)
-                    self.coaches[current_id] = node
-                    
-                    print(f"  Coach {current_id}: Left={left_id}, Right={right_id}")
+                    if len(parts) >= 3:
+                        left_id = int(parts[0])
+                        current_id = int(parts[1])
+                        right_id = int(parts[2])
+                        
+                        # Create coach node
+                        node = CoachNode(current_id, left_id, right_id)
+                        self.coaches[current_id] = node
+                        
+                        left_str = f"C{left_id}" if left_id != -1 else "NULL"
+                        right_str = f"C{right_id}" if right_id != -1 else "NULL"
+                        
+                        print(f"  ✓ Coach {current_id}: {left_str} ← [C{current_id}] → {right_str}")
+                    else:
+                        print(f"  ✗ Invalid response format: {response}")
+                        
+                except ValueError as e:
+                    print(f"  ✗ Parse error: {e} - Response: {response}")
+            else:
+                print(f"  ⚠ No response from Coach {coach_id} (may not exist)")
+        
+        print(f"\n{'=' * 60}")
+        print(f"DISCOVERY COMPLETE: {len(self.coaches)} coaches found")
+        print(f"{'=' * 60}\n")
+        
+        if len(self.coaches) == 0:
+            print("✗ ERROR: No coaches discovered!")
+            print("  Check:")
+            print("  1. Arduino power connections")
+            print("  2. USB connection to Gateway C0")
+            print("  3. Arduino code uploaded correctly")
+            print("  4. Serial port settings")
+            return False
         
         # Build linked list
-        self.build_linked_list()
-        self.mapped = True
-        print(f"✓ Train mapped: {len(self.coaches)} coaches detected")
-        print(f"  Train order: {' → '.join(map(str, self.train_order))}")
+        success = self.build_linked_list()
+        
+        if success:
+            self.mapped = True
+            print(f"✓ Train mapped successfully")
+            print(f"  Train order: {' → '.join([f'C{id}' for id in self.train_order])}\n")
+            return True
+        else:
+            return False
     
     def build_linked_list(self):
         """Reconstruct linked list from discovered coaches"""
+        print("🔗 Building linked list structure...")
+        
         # Find head (coach with left = -1)
+        head_found = False
         for coach_id, node in self.coaches.items():
             if node.left_id == -1:
                 self.head = node
+                head_found = True
+                print(f"  ✓ Head coach found: C{coach_id}")
                 break
         
-        if not self.head:
-            print("✗ No head coach found!")
-            return
+        if not head_found:
+            print("  ✗ ERROR: No head coach found!")
+            print("  Expected: One coach with left_id = -1")
+            print("  Found coaches:")
+            for coach_id, node in self.coaches.items():
+                print(f"    C{coach_id}: left={node.left_id}, right={node.right_id}")
+            return False
         
         # Traverse and link nodes
         current = self.head
         self.train_order = []
+        visited = set()
         
         while current:
+            if current.coach_id in visited:
+                print(f"  ✗ ERROR: Circular reference detected at C{current.coach_id}")
+                return False
+            
+            visited.add(current.coach_id)
             self.train_order.append(current.coach_id)
             
             # Link to next coach
-            if current.right_id != -1 and current.right_id in self.coaches:
-                current.next = self.coaches[current.right_id]
-                current = current.next
+            if current.right_id != -1:
+                if current.right_id in self.coaches:
+                    current.next = self.coaches[current.right_id]
+                    current = current.next
+                else:
+                    print(f"  ✗ ERROR: Coach C{current.right_id} referenced but not found")
+                    return False
             else:
                 break
+        
+        print(f"  ✓ Linked list built: {len(self.train_order)} coaches linked\n")
+        return True
     
     def update_temperatures(self):
-        """Phase 2: Continuously update temperatures"""
+        """Update temperatures from all coaches"""
         for coach_id in self.train_order:
             response = self.send_command(f"TEMP,{coach_id}")
             
             if response and response != "ERROR":
-                parts = response.split(',')
-                if len(parts) >= 4:
-                    try:
+                try:
+                    parts = response.split(',')
+                    if len(parts) >= 4:
                         temp = float(parts[3])
                         self.coaches[coach_id].temperature = temp
-                    except ValueError:
-                        pass
+                except (ValueError, IndexError) as e:
+                    print(f"Temp parse error for C{coach_id}: {e}")
     
     def get_temp_color(self, temp):
-        """Determine color based on temperature thresholds"""
+        """Determine color based on temperature"""
         if temp is None:
-            return "gray"
+            return "#555555"
         elif temp < 30:
-            return "#00FF00"  # Green - Normal
+            return "#00FF00"
         elif temp < 40:
-            return "#FFD700"  # Yellow - Warning
+            return "#FFD700"
         else:
-            return "#FF0000"  # Red - Critical (Hot Axle)
+            return "#FF0000"
+    
+    def get_temp_status(self, temp):
+        """Get status text for temperature"""
+        if temp is None:
+            return "NO DATA"
+        elif temp < 30:
+            return "NORMAL"
+        elif temp < 40:
+            return "WARNING"
+        else:
+            return "CRITICAL"
     
     def create_gui(self):
         """Create visualization GUI"""
         self.root = tk.Tk()
         self.root.title("🚆 Hot Axle Monitoring - Linked List View")
-        self.root.geometry("800x600")
+        self.root.geometry("900x650")
         self.root.configure(bg='#1a1a1a')
         
         # Title
         title = tk.Label(
             self.root,
             text="🚆 DISTRIBUTED HOT AXLE MONITORING SYSTEM",
-            font=("Arial", 16, "bold"),
+            font=("Arial", 18, "bold"),
             bg='#1a1a1a',
-            fg='white'
+            fg='#00FF00'
         )
-        title.pack(pady=10)
+        title.pack(pady=15)
+        
+        # Subtitle
+        subtitle = tk.Label(
+            self.root,
+            text="Linked List Based Real-Time Temperature Monitoring",
+            font=("Arial", 11),
+            bg='#1a1a1a',
+            fg='#888888'
+        )
+        subtitle.pack()
         
         # Status
         self.status_label = tk.Label(
             self.root,
             text="Status: Initializing...",
-            font=("Arial", 10),
+            font=("Arial", 11, "bold"),
             bg='#1a1a1a',
             fg='#00FF00'
         )
-        self.status_label.pack()
+        self.status_label.pack(pady=5)
         
-        # Canvas for train visualization
+        # Canvas
         self.canvas = tk.Canvas(
             self.root,
-            width=780,
-            height=500,
+            width=880,
+            height=450,
             bg='#0d0d0d',
-            highlightthickness=0
+            highlightthickness=2,
+            highlightbackground='#333333'
         )
         self.canvas.pack(pady=10)
         
         # Legend
         legend_frame = tk.Frame(self.root, bg='#1a1a1a')
-        legend_frame.pack()
+        legend_frame.pack(pady=5)
         
-        tk.Label(legend_frame, text="◼", fg="#00FF00", bg='#1a1a1a', font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
-        tk.Label(legend_frame, text="Normal (<30°C)", fg="white", bg='#1a1a1a').pack(side=tk.LEFT, padx=5)
+        legends = [
+            ("#00FF00", "Normal (<30°C)"),
+            ("#FFD700", "Warning (30-40°C)"),
+            ("#FF0000", "Critical (>40°C)"),
+            ("#555555", "No Data")
+        ]
         
-        tk.Label(legend_frame, text="◼", fg="#FFD700", bg='#1a1a1a', font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
-        tk.Label(legend_frame, text="Warning (30-40°C)", fg="white", bg='#1a1a1a').pack(side=tk.LEFT, padx=5)
-        
-        tk.Label(legend_frame, text="◼", fg="#FF0000", bg='#1a1a1a', font=("Arial", 14)).pack(side=tk.LEFT, padx=5)
-        tk.Label(legend_frame, text="Critical (>40°C)", fg="white", bg='#1a1a1a').pack(side=tk.LEFT, padx=5)
+        for color, text in legends:
+            tk.Label(
+                legend_frame,
+                text="◼",
+                fg=color,
+                bg='#1a1a1a',
+                font=("Arial", 16)
+            ).pack(side=tk.LEFT, padx=3)
+            tk.Label(
+                legend_frame,
+                text=text,
+                fg="white",
+                bg='#1a1a1a',
+                font=("Arial", 10)
+            ).pack(side=tk.LEFT, padx=8)
     
     def draw_train(self):
-        """Draw train as linked list on canvas"""
+        """Draw train as linked list"""
         if not self.mapped:
             return
         
         self.canvas.delete("all")
         
-        # Calculate positions
         num_coaches = len(self.train_order)
-        spacing = 150
-        start_x = 50
-        y = 250
+        if num_coaches == 0:
+            return
         
-        # Draw each coach node
+        # Calculate layout
+        node_width = 140
+        node_height = 120
+        spacing = 180
+        start_x = 50
+        y = 220
+        
+        # Draw each coach
         for i, coach_id in enumerate(self.train_order):
             node = self.coaches[coach_id]
             x = start_x + (i * spacing)
             
-            # Coach box
             temp = node.temperature
             color = self.get_temp_color(temp)
+            status = self.get_temp_status(temp)
             
-            # Draw node box
+            # Node rectangle
             self.canvas.create_rectangle(
-                x, y - 50, x + 100, y + 50,
+                x, y - node_height//2,
+                x + node_width, y + node_height//2,
                 fill=color,
                 outline='white',
-                width=2
+                width=3
             )
             
-            # Coach ID
+            # Coach label
             self.canvas.create_text(
-                x + 50, y - 30,
-                text=f"Coach {coach_id}",
-                font=("Arial", 12, "bold"),
+                x + node_width//2, y - 40,
+                text=f"COACH {coach_id}",
+                font=("Arial", 13, "bold"),
                 fill='black'
             )
             
             # Temperature
             temp_text = f"{temp:.1f}°C" if temp is not None else "---"
             self.canvas.create_text(
-                x + 50, y,
+                x + node_width//2, y - 5,
                 text=temp_text,
-                font=("Arial", 14, "bold"),
+                font=("Arial", 16, "bold"),
                 fill='black'
             )
             
-            # Left pointer (if not head)
-            if node.left_id != -1:
-                self.canvas.create_text(
-                    x + 10, y + 30,
-                    text=f"← {node.left_id}",
-                    font=("Arial", 9),
-                    fill='white'
-                )
-            else:
-                self.canvas.create_text(
-                    x + 10, y + 30,
-                    text="← NULL",
-                    font=("Arial", 9),
-                    fill='#888888'
-                )
+            # Status
+            self.canvas.create_text(
+                x + node_width//2, y + 20,
+                text=status,
+                font=("Arial", 9, "bold"),
+                fill='black'
+            )
             
-            # Right pointer (if not tail)
-            if node.right_id != -1:
-                self.canvas.create_text(
-                    x + 90, y + 30,
-                    text=f"{node.right_id} →",
-                    font=("Arial", 9),
-                    fill='white'
-                )
-            else:
-                self.canvas.create_text(
-                    x + 90, y + 30,
-                    text="NULL →",
-                    font=("Arial", 9),
-                    fill='#888888'
-                )
+            # Left pointer
+            left_text = f"← {node.left_id}" if node.left_id != -1 else "← NULL"
+            self.canvas.create_text(
+                x + 15, y + 45,
+                text=left_text,
+                font=("Arial", 9),
+                fill='#AAAAAA'
+            )
             
-            # Draw arrow to next node
+            # Right pointer
+            right_text = f"{node.right_id} →" if node.right_id != -1 else "NULL →"
+            self.canvas.create_text(
+                x + node_width - 15, y + 45,
+                text=right_text,
+                font=("Arial", 9),
+                fill='#AAAAAA'
+            )
+            
+            # Arrow to next
             if i < num_coaches - 1:
+                arrow_start_x = x + node_width
+                arrow_end_x = x + spacing
+                
                 self.canvas.create_line(
-                    x + 100, y,
-                    x + 150, y,
+                    arrow_start_x, y,
+                    arrow_end_x, y,
                     arrow=tk.LAST,
-                    fill='white',
-                    width=3
+                    fill='#00FF00',
+                    width=4
+                )
+                
+                self.canvas.create_text(
+                    (arrow_start_x + arrow_end_x) // 2, y - 15,
+                    text="next",
+                    font=("Arial", 8, "italic"),
+                    fill='#888888'
                 )
         
         # Update status
-        self.status_label.config(text=f"Status: Monitoring {num_coaches} coaches")
+        critical_count = sum(1 for id in self.train_order 
+                           if self.coaches[id].temperature and 
+                           self.coaches[id].temperature >= 40)
+        
+        if critical_count > 0:
+            status_text = f"⚠ ALERT: {critical_count} coach(es) in CRITICAL state!"
+            status_color = "#FF0000"
+        else:
+            status_text = f"✓ Monitoring {num_coaches} coaches - All systems normal"
+            status_color = "#00FF00"
+        
+        self.status_label.config(text=status_text, fg=status_color)
     
     def monitoring_loop(self):
-        """Background thread for continuous monitoring"""
+        """Background monitoring thread"""
         while self.running:
             if self.mapped:
                 self.update_temperatures()
                 self.root.after(0, self.draw_train)
-            time.sleep(2)  # Update every 2 seconds
+            time.sleep(2)
     
     def run(self):
-        """Main application loop"""
-        # Connect to gateway
+        """Main application"""
+        print("=" * 60)
+        print("🚆 HOT AXLE MONITORING SYSTEM - RASPBERRY PI")
+        print("=" * 60)
+        print()
+        
+        # Connect
         if not self.connect():
-            print("Failed to connect to gateway")
+            print("\n❌ STARTUP FAILED - Cannot connect to gateway")
             return
         
-        # Wait for coaches to complete neighbor discovery
-        print("Waiting for coaches to complete setup (5 seconds)...")
+        # Wait for neighbor discovery
+        print("⏳ Waiting for coaches to complete neighbor discovery (5s)...")
         time.sleep(5)
         
-        # Discover train topology
-        self.discover_train()
+        # Discover train
+        if not self.discover_train():
+            print("\n❌ STARTUP FAILED - Train discovery failed")
+            return
         
         # Create GUI
+        print("🖥  Launching GUI...\n")
         self.create_gui()
         
-        # Start monitoring thread
+        # Start monitoring
         self.running = True
         monitor_thread = threading.Thread(target=self.monitoring_loop, daemon=True)
         monitor_thread.start()
@@ -331,18 +511,22 @@ class TrainMonitor:
         self.draw_train()
         
         # Start GUI
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            print("\nShutting down...")
         
         # Cleanup
         self.running = False
         if self.serial_port:
             self.serial_port.close()
+        print("✓ Shutdown complete")
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("🚆 HOT AXLE MONITORING SYSTEM - RASPBERRY PI")
-    print("=" * 60)
+    # Check for port argument
+    port = '/dev/ttyUSB0'
+    if len(sys.argv) > 1:
+        port = sys.argv[1]
     
-    # Configure serial port (change if needed)
-    monitor = TrainMonitor(port='/dev/ttyUSB0', baudrate=9600)
+    monitor = TrainMonitor(port=port, baudrate=9600)
     monitor.run()
