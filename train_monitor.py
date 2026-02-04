@@ -240,6 +240,28 @@ class TrainMonitor:
             
             self.train_order = [0, 1, 2]
         
+        # CASE 2b: C0, C1, C3 present (3 coaches, with C3 instead of C2)
+        elif has_c0 and has_c1 and has_c3 and not has_c2:
+            print("Configuration: C0 → C1 → C3 (3 coaches with C3)")
+            print()
+            
+            # Create Coach 0
+            node0 = CoachNode(coach_id=0, left_id=-1, right_id=1)
+            self.coaches[0] = node0
+            print(f"  ✓ Coach 0: NULL ← [C0] → C1")
+            
+            # Create Coach 1
+            node1 = CoachNode(coach_id=1, left_id=0, right_id=3)
+            self.coaches[1] = node1
+            print(f"  ✓ Coach 1: C0 ← [C1] → C3")
+            
+            # Create Coach 3
+            node3 = CoachNode(coach_id=3, left_id=1, right_id=-1)
+            self.coaches[3] = node3
+            print(f"  ✓ Coach 3: C1 ← [C3] → NULL")
+            
+            self.train_order = [0, 1, 3]
+        
         # CASE 3: All coaches present including C3 (4 coaches)
         elif has_c0 and has_c1 and has_c2 and has_c3:
             print("Configuration: C0 → C1 → C3 → C2 (4 coaches)")
@@ -597,7 +619,11 @@ class TrainMonitor:
             if num_coaches == 2:
                 config_text = "2-Coach"
             elif num_coaches == 3:
-                config_text = "3-Coach"
+                # Check if it's C0-C1-C3 or C0-C1-C2
+                if 3 in self.train_order and 2 not in self.train_order:
+                    config_text = "3-Coach (C3)"
+                else:
+                    config_text = "3-Coach"
             elif num_coaches == 4:
                 config_text = "4-Coach (+C3)"
             else:
