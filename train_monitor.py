@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Hot Axle Monitoring System - Raspberry Pi Controller (HARDCODED MAP)
+Hot Axle Monitoring System - Raspberry Pi Controller (DYNAMIC DETECTION)
 Displays train as linked list with real-time temperature monitoring
-Hardcoded topology: C0 → C1 → C2
+Auto-detects configuration:
+  - 3 coaches: C0 → C1 → C2
+  - 4 coaches: C0 → C1 → C3 → C2
 Optimized for 3.5" TFT Display (480x320)
 """
 
@@ -33,10 +35,11 @@ class TrainMonitor:
         self.port = port
         self.baudrate = baudrate
         
-        # Train data structures - HARDCODED TOPOLOGY
+        # Train data structures - DYNAMIC
         self.coaches = {}
         self.head = None
-        self.train_order = [0, 1, 2]  # C0 → C1 → C2
+        self.train_order = []
+        self.detected_coaches = set()
         
         # GUI
         self.root = None
@@ -97,7 +100,7 @@ class TrainMonitor:
     
     def send_command(self, command):
         """Send command and get response with robust error handling"""
-        max_retries = 2  # Reduced retries to avoid hanging
+        max_retries = 2
         
         for attempt in range(max_retries):
             try:
@@ -116,7 +119,7 @@ class TrainMonitor:
                 self.serial_port.flush()
                 
                 # Wait for response with shorter timeout
-                time.sleep(0.3)
+                time.sleep(0.25)  # Faster response
                 
                 if self.serial_port.in_waiting:
                     # Read response with error handling
@@ -137,7 +140,7 @@ class TrainMonitor:
                     
             except (OSError, IOError) as e:
                 # I/O error - serial connection issue
-                print(f"  I/O Error: {e} - Check USB connection")
+                print(f"  I/O Error: {e}")
                 return None
             except UnicodeDecodeError as e:
                 if attempt < max_retries - 1:
@@ -150,33 +153,101 @@ class TrainMonitor:
         
         return None
     
-    def create_hardcoded_topology(self):
-        """Create hardcoded train topology: C0 → C1 → C2"""
+    def detect_coaches(self):
+        """Detect which coaches are physically present"""
         print("=" * 60)
-        print("🔍 CREATING HARDCODED TRAIN TOPOLOGY")
+        print("🔍 DETECTING COACH PRESENCE")
         print("=" * 60)
         print()
-        print("Hardcoded Configuration: C0 → C1 → C2")
+        
+        self.detected_coaches.clear()
+        
+        # Try to detect C0, C1, C2, C3
+        for coach_id in [0, 1, 2, 3]:
+            print(f"Probing Coach {coach_id}...", end=" ")
+            response = self.send_command(f"TEMP,{coach_id}")
+            
+            if response and response != "ERROR":
+                self.detected_coaches.add(coach_id)
+                print(f"✓ DETECTED")
+            else:
+                print(f"✗ Not found")
+        
+        print()
+        print(f"Detected coaches: {sorted(self.detected_coaches)}")
         print()
         
-        # Create Coach 0 (Head)
-        node0 = CoachNode(coach_id=0, left_id=-1, right_id=1)
-        self.coaches[0] = node0
-        print(f"  ✓ Coach 0: NULL ← [C0] → C1")
+        return len(self.detected_coaches) > 0
+    
+    def create_dynamic_topology(self):
+        """Create train topology based on detected coaches"""
+        print("=" * 60)
+        print("🔗 CREATING TRAIN TOPOLOGY")
+        print("=" * 60)
+        print()
         
-        # Create Coach 1 (Middle)
-        node1 = CoachNode(coach_id=1, left_id=0, right_id=2)
-        self.coaches[1] = node1
-        print(f"  ✓ Coach 1: C0 ← [C1] → C2")
+        num_coaches = len(self.detected_coaches)
         
-        # Create Coach 2 (Tail)
-        node2 = CoachNode(coach_id=2, left_id=1, right_id=-1)
-        self.coaches[2] = node2
-        print(f"  ✓ Coach 2: C1 ← [C2] → NULL")
+        if num_coaches == 0:
+            print("✗ No coaches detected!")
+            return False
+        
+        # Check if C3 is present
+        has_c3 = 3 in self.detected_coaches
+        
+        if has_c3:
+            # Configuration: C0 → C1 → C3 → C2
+            print("Configuration: C0 → C1 → C3 → C2 (4 coaches)")
+            print()
+            
+            # Create Coach 0
+            node0 = CoachNode(coach_id=0, left_id=-1, right_id=1)
+            self.coaches[0] = node0
+            print(f"  ✓ Coach 0: NULL ← [C0] → C1")
+            
+            # Create Coach 1
+            node1 = CoachNode(coach_id=1, left_id=0, right_id=3)
+            self.coaches[1] = node1
+            print(f"  ✓ Coach 1: C0 ← [C1] → C3")
+            
+            # Create Coach 3 (NEW - inserted between C1 and C2)
+            node3 = CoachNode(coach_id=3, left_id=1, right_id=2)
+            self.coaches[3] = node3
+            print(f"  ✓ Coach 3: C1 ← [C3] → C2 (NEW COACH INSERTED)")
+            
+            # Create Coach 2
+            node2 = CoachNode(coach_id=2, left_id=3, right_id=-1)
+            self.coaches[2] = node2
+            print(f"  ✓ Coach 2: C3 ← [C2] → NULL")
+            
+            self.train_order = [0, 1, 3, 2]
+            
+        else:
+            # Configuration: C0 → C1 → C2
+            print("Configuration: C0 → C1 → C2 (3 coaches)")
+            print()
+            
+            # Create Coach 0
+            node0 = CoachNode(coach_id=0, left_id=-1, right_id=1)
+            self.coaches[0] = node0
+            print(f"  ✓ Coach 0: NULL ← [C0] → C1")
+            
+            # Create Coach 1
+            node1 = CoachNode(coach_id=1, left_id=0, right_id=2)
+            self.coaches[1] = node1
+            print(f"  ✓ Coach 1: C0 ← [C1] → C2")
+            
+            # Create Coach 2
+            node2 = CoachNode(coach_id=2, left_id=1, right_id=-1)
+            self.coaches[2] = node2
+            print(f"  ✓ Coach 2: C1 ← [C2] → NULL")
+            
+            self.train_order = [0, 1, 2]
         
         print()
         print("=" * 60)
         print(f"TOPOLOGY COMPLETE: {len(self.coaches)} coaches configured")
+        print(f"Train order: {' → '.join([f'C{id}' for id in self.train_order])}")
         print("=" * 60)
         print()
         
@@ -187,20 +258,25 @@ class TrainMonitor:
         return True
     
     def build_linked_list(self):
-        """Build linked list structure from hardcoded topology"""
+        """Build linked list structure from topology"""
         print("🔗 Building linked list structure...")
         
         # Set head
         self.head = self.coaches[0]
         print(f"  ✓ Head coach: C0")
         
-        # Link nodes
-        self.coaches[0].next = self.coaches[1]
-        self.coaches[1].next = self.coaches[2]
-        self.coaches[2].next = None
+        # Link nodes according to train_order
+        for i in range(len(self.train_order) - 1):
+            current_id = self.train_order[i]
+            next_id = self.train_order[i + 1]
+            self.coaches[current_id].next = self.coaches[next_id]
+        
+        # Last coach points to None
+        last_id = self.train_order[-1]
+        self.coaches[last_id].next = None
         
         print(f"  ✓ Linked list built: {len(self.coaches)} coaches")
-        print(f"  ✓ Train order: C0 → C1 → C2\n")
+        print(f"  ✓ Train order: {' → '.join([f'C{id}' for id in self.train_order])}\n")
     
     def update_temperatures(self):
         """Continuously update temperatures from all coaches"""
@@ -223,7 +299,6 @@ class TrainMonitor:
                     print(f"⚠ C{coach_id}: No response")
             except Exception as e:
                 print(f"⚠ C{coach_id}: Communication error - {e}")
-                # Don't break the loop, try next coach
                 continue
     
     def get_temp_color(self, temp):
@@ -321,7 +396,7 @@ class TrainMonitor:
             ).pack(side=tk.LEFT, padx=3)
     
     def draw_train(self):
-        """Draw train as linked list - Optimized for 480x320 TFT"""
+        """Draw train as linked list - Optimized for 480x320 TFT - DYNAMIC LAYOUT"""
         if not self.mapped:
             self.canvas.create_text(
                 235, 120,
@@ -333,18 +408,24 @@ class TrainMonitor:
         
         self.canvas.delete("all")
         
-        # Debug: Show we're drawing
-        print(f"[GUI] Drawing {len(self.train_order)} coaches")
-        
         num_coaches = len(self.train_order)
         if num_coaches == 0:
             return
         
-        # Layout optimized for 480x320 display
-        node_width = 90
-        node_height = 80
-        spacing = 120
-        start_x = 40
+        # Dynamic layout based on number of coaches
+        if num_coaches == 4:
+            # 4 coaches - tighter spacing
+            node_width = 75
+            node_height = 75
+            spacing = 100
+            start_x = 20
+        else:
+            # 3 coaches - more spacing
+            node_width = 90
+            node_height = 80
+            spacing = 120
+            start_x = 40
+        
         y = 120
         
         # Draw each coach
@@ -356,15 +437,17 @@ class TrainMonitor:
             color = self.get_temp_color(temp)
             status = self.get_temp_status(temp)
             
-            print(f"[GUI] C{coach_id}: Temp={temp}, Color={color}")
+            # Highlight C3 if present
+            outline_color = 'yellow' if coach_id == 3 else 'white'
+            outline_width = 3 if coach_id == 3 else 2
             
             # Node rectangle
             self.canvas.create_rectangle(
                 x, y - node_height//2,
                 x + node_width, y + node_height//2,
                 fill=color,
-                outline='white',
-                width=2
+                outline=outline_color,
+                width=outline_width
             )
             
             # Coach label
@@ -380,48 +463,48 @@ class TrainMonitor:
             self.canvas.create_text(
                 x + node_width//2, y - 5,
                 text=temp_text,
-                font=("Arial", 11, "bold"),
+                font=("Arial", 10, "bold"),
                 fill='black'
             )
             
             # Status
-            status_short = status[:4]  # NORM, WARN, CRIT, N/A
+            status_short = status[:4]
             self.canvas.create_text(
                 x + node_width//2, y + 15,
                 text=status_short,
-                font=("Arial", 7, "bold"),
+                font=("Arial", 6, "bold"),
                 fill='black'
             )
             
             # Left pointer
             if node.left_id != -1:
                 self.canvas.create_text(
-                    x + 8, y + 32,
+                    x + 8, y + 30,
                     text=f"←{node.left_id}",
-                    font=("Arial", 7),
+                    font=("Arial", 6),
                     fill='#AAAAAA'
                 )
             else:
                 self.canvas.create_text(
-                    x + 8, y + 32,
+                    x + 8, y + 30,
                     text="←X",
-                    font=("Arial", 7),
+                    font=("Arial", 6),
                     fill='#666666'
                 )
             
             # Right pointer
             if node.right_id != -1:
                 self.canvas.create_text(
-                    x + node_width - 8, y + 32,
+                    x + node_width - 8, y + 30,
                     text=f"{node.right_id}→",
-                    font=("Arial", 7),
+                    font=("Arial", 6),
                     fill='#AAAAAA'
                 )
             else:
                 self.canvas.create_text(
-                    x + node_width - 8, y + 32,
+                    x + node_width - 8, y + 30,
                     text="X→",
-                    font=("Arial", 7),
+                    font=("Arial", 6),
                     fill='#666666'
                 )
             
@@ -441,7 +524,7 @@ class TrainMonitor:
                 self.canvas.create_text(
                     (arrow_start_x + arrow_end_x) // 2, y - 10,
                     text="next",
-                    font=("Arial", 6, "italic"),
+                    font=("Arial", 5, "italic"),
                     fill='#888888'
                 )
         
@@ -454,24 +537,24 @@ class TrainMonitor:
             status_text = f"ALERT: {critical_count} CRITICAL!"
             status_color = "#FF0000"
         else:
-            status_text = f"Monitoring {num_coaches} coaches - OK"
+            config_text = "4-coach" if num_coaches == 4 else "3-coach"
+            status_text = f"{config_text} | {num_coaches} coaches - OK"
             status_color = "#00FF00"
         
         self.status_label.config(text=status_text, fg=status_color)
-        print(f"[GUI] Status: {status_text}\n")
     
     def monitoring_loop(self):
-        """Background monitoring thread"""
+        """Background monitoring thread - FASTER UPDATE"""
         print("\n🔄 Starting temperature monitoring loop...\n")
         cycle = 0
         while self.running:
             if self.mapped:
                 cycle += 1
-                print(f"--- Monitoring Cycle {cycle} ---")
+                print(f"--- Cycle {cycle} ---")
                 self.update_temperatures()
                 self.root.after(0, self.draw_train)
                 print()
-            time.sleep(2)
+            time.sleep(1)  # Faster - 1 second update interval
     
     def run(self):
         """Main application"""
@@ -489,8 +572,13 @@ class TrainMonitor:
         print("⏳ Waiting for coaches to complete neighbor discovery (5s)...")
         time.sleep(5)
         
-        # Create hardcoded topology (skip real discovery)
-        if not self.create_hardcoded_topology():
+        # Detect which coaches are present
+        if not self.detect_coaches():
+            print("\n❌ STARTUP FAILED - No coaches detected")
+            return
+        
+        # Create dynamic topology based on detection
+        if not self.create_dynamic_topology():
             print("\n❌ STARTUP FAILED - Topology creation failed")
             return
         
