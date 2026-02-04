@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Hot Axle Monitoring System - Raspberry Pi Controller (REVISED)
-Robust error handling and binary communication
+Hot Axle Monitoring System - Raspberry Pi Controller (HARDCODED MAP)
+Displays train as linked list with real-time temperature monitoring
+Hardcoded topology: C0 → C1 → C2
 """
 
 import serial
@@ -22,23 +23,27 @@ class CoachNode:
 
 class TrainMonitor:
     def __init__(self, port='/dev/ttyUSB0', baudrate=9600):
+        # Serial connection to Gateway Arduino
         self.serial_port = None
         self.port = port
         self.baudrate = baudrate
         
+        # Train data structures - HARDCODED TOPOLOGY
         self.coaches = {}
         self.head = None
-        self.train_order = []
+        self.train_order = [0, 1, 2]  # C0 → C1 → C2
         
+        # GUI
         self.root = None
         self.canvas = None
         self.status_label = None
         
+        # Control
         self.running = False
         self.mapped = False
         
     def connect(self):
-        """Connect to Arduino gateway"""
+        """Connect to Arduino gateway via USB"""
         try:
             print(f"Connecting to {self.port}...")
             self.serial_port = serial.Serial(
@@ -137,116 +142,60 @@ class TrainMonitor:
         
         return None
     
-    def discover_train(self):
-        """Discover all coaches and build map"""
+    def create_hardcoded_topology(self):
+        """Create hardcoded train topology: C0 → C1 → C2"""
         print("=" * 60)
-        print("🔍 DISCOVERING TRAIN TOPOLOGY")
+        print("🔍 CREATING HARDCODED TRAIN TOPOLOGY")
         print("=" * 60)
+        print()
+        print("Hardcoded Configuration: C0 → C1 → C2")
+        print()
         
-        # Request map bundles from coaches 0-3
-        for coach_id in range(4):
-            print(f"\n📡 Requesting map from Coach {coach_id}...")
-            response = self.send_command(f"MAP,{coach_id}")
-            
-            if response and response != "ERROR":
-                try:
-                    parts = response.split(',')
-                    
-                    if len(parts) >= 3:
-                        left_id = int(parts[0])
-                        current_id = int(parts[1])
-                        right_id = int(parts[2])
-                        
-                        # Create coach node
-                        node = CoachNode(current_id, left_id, right_id)
-                        self.coaches[current_id] = node
-                        
-                        left_str = f"C{left_id}" if left_id != -1 else "NULL"
-                        right_str = f"C{right_id}" if right_id != -1 else "NULL"
-                        
-                        print(f"  ✓ Coach {current_id}: {left_str} ← [C{current_id}] → {right_str}")
-                    else:
-                        print(f"  ✗ Invalid response format: {response}")
-                        
-                except ValueError as e:
-                    print(f"  ✗ Parse error: {e} - Response: {response}")
-            else:
-                print(f"  ⚠ No response from Coach {coach_id} (may not exist)")
+        # Create Coach 0 (Head)
+        node0 = CoachNode(coach_id=0, left_id=-1, right_id=1)
+        self.coaches[0] = node0
+        print(f"  ✓ Coach 0: NULL ← [C0] → C1")
         
-        print(f"\n{'=' * 60}")
-        print(f"DISCOVERY COMPLETE: {len(self.coaches)} coaches found")
-        print(f"{'=' * 60}\n")
+        # Create Coach 1 (Middle)
+        node1 = CoachNode(coach_id=1, left_id=0, right_id=2)
+        self.coaches[1] = node1
+        print(f"  ✓ Coach 1: C0 ← [C1] → C2")
         
-        if len(self.coaches) == 0:
-            print("✗ ERROR: No coaches discovered!")
-            print("  Check:")
-            print("  1. Arduino power connections")
-            print("  2. USB connection to Gateway C0")
-            print("  3. Arduino code uploaded correctly")
-            print("  4. Serial port settings")
-            return False
+        # Create Coach 2 (Tail)
+        node2 = CoachNode(coach_id=2, left_id=1, right_id=-1)
+        self.coaches[2] = node2
+        print(f"  ✓ Coach 2: C1 ← [C2] → NULL")
+        
+        print()
+        print("=" * 60)
+        print(f"TOPOLOGY COMPLETE: {len(self.coaches)} coaches configured")
+        print("=" * 60)
+        print()
         
         # Build linked list
-        success = self.build_linked_list()
+        self.build_linked_list()
+        self.mapped = True
         
-        if success:
-            self.mapped = True
-            print(f"✓ Train mapped successfully")
-            print(f"  Train order: {' → '.join([f'C{id}' for id in self.train_order])}\n")
-            return True
-        else:
-            return False
-    
-    def build_linked_list(self):
-        """Reconstruct linked list from discovered coaches"""
-        print("🔗 Building linked list structure...")
-        
-        # Find head (coach with left = -1)
-        head_found = False
-        for coach_id, node in self.coaches.items():
-            if node.left_id == -1:
-                self.head = node
-                head_found = True
-                print(f"  ✓ Head coach found: C{coach_id}")
-                break
-        
-        if not head_found:
-            print("  ✗ ERROR: No head coach found!")
-            print("  Expected: One coach with left_id = -1")
-            print("  Found coaches:")
-            for coach_id, node in self.coaches.items():
-                print(f"    C{coach_id}: left={node.left_id}, right={node.right_id}")
-            return False
-        
-        # Traverse and link nodes
-        current = self.head
-        self.train_order = []
-        visited = set()
-        
-        while current:
-            if current.coach_id in visited:
-                print(f"  ✗ ERROR: Circular reference detected at C{current.coach_id}")
-                return False
-            
-            visited.add(current.coach_id)
-            self.train_order.append(current.coach_id)
-            
-            # Link to next coach
-            if current.right_id != -1:
-                if current.right_id in self.coaches:
-                    current.next = self.coaches[current.right_id]
-                    current = current.next
-                else:
-                    print(f"  ✗ ERROR: Coach C{current.right_id} referenced but not found")
-                    return False
-            else:
-                break
-        
-        print(f"  ✓ Linked list built: {len(self.train_order)} coaches linked\n")
         return True
     
+    def build_linked_list(self):
+        """Build linked list structure from hardcoded topology"""
+        print("🔗 Building linked list structure...")
+        
+        # Set head
+        self.head = self.coaches[0]
+        print(f"  ✓ Head coach: C0")
+        
+        # Link nodes
+        self.coaches[0].next = self.coaches[1]
+        self.coaches[1].next = self.coaches[2]
+        self.coaches[2].next = None
+        
+        print(f"  ✓ Linked list built: {len(self.coaches)} coaches")
+        print(f"  ✓ Train order: C0 → C1 → C2\n")
+    
     def update_temperatures(self):
-        """Update temperatures from all coaches"""
+        """Continuously update temperatures from all coaches"""
         for coach_id in self.train_order:
             response = self.send_command(f"TEMP,{coach_id}")
             
@@ -256,8 +205,12 @@ class TrainMonitor:
                     if len(parts) >= 4:
                         temp = float(parts[3])
                         self.coaches[coach_id].temperature = temp
+                        # Optional: Print to console for debugging
+                        # print(f"C{coach_id}: {temp:.1f}°C")
                 except (ValueError, IndexError) as e:
                     print(f"Temp parse error for C{coach_id}: {e}")
+            else:
+                print(f"No temperature data from C{coach_id}")
     
     def get_temp_color(self, temp):
         """Determine color based on temperature"""
@@ -371,7 +324,7 @@ class TrainMonitor:
         node_width = 140
         node_height = 120
         spacing = 180
-        start_x = 50
+        start_x = 100
         y = 220
         
         # Draw each coach
@@ -493,9 +446,9 @@ class TrainMonitor:
         print("⏳ Waiting for coaches to complete neighbor discovery (5s)...")
         time.sleep(5)
         
-        # Discover train
-        if not self.discover_train():
-            print("\n❌ STARTUP FAILED - Train discovery failed")
+        # Create hardcoded topology (skip real discovery)
+        if not self.create_hardcoded_topology():
+            print("\n❌ STARTUP FAILED - Topology creation failed")
             return
         
         # Create GUI
