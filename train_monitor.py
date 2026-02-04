@@ -92,10 +92,15 @@ class TrainMonitor:
     
     def send_command(self, command):
         """Send command and get response with robust error handling"""
-        max_retries = 3
+        max_retries = 2  # Reduced retries to avoid hanging
         
         for attempt in range(max_retries):
             try:
+                # Check if port is still open
+                if not self.serial_port or not self.serial_port.is_open:
+                    print(f"  Serial port closed, attempting reconnect...")
+                    return None
+                
                 # Flush buffers
                 self.serial_port.reset_input_buffer()
                 self.serial_port.reset_output_buffer()
@@ -105,8 +110,8 @@ class TrainMonitor:
                 self.serial_port.write(cmd_bytes)
                 self.serial_port.flush()
                 
-                # Wait for response
-                time.sleep(0.4)
+                # Wait for response with shorter timeout
+                time.sleep(0.3)
                 
                 if self.serial_port.in_waiting:
                     # Read response with error handling
@@ -116,28 +121,26 @@ class TrainMonitor:
                         return response
                     elif response == "ERROR":
                         if attempt < max_retries - 1:
-                            print(f"  Retry {attempt + 1}/{max_retries} for: {command}")
-                            time.sleep(0.2)
+                            time.sleep(0.1)
                             continue
                         return None
                 else:
                     if attempt < max_retries - 1:
-                        print(f"  No response, retry {attempt + 1}/{max_retries} for: {command}")
-                        time.sleep(0.2)
+                        time.sleep(0.1)
                         continue
                     return None
                     
+            except (OSError, IOError) as e:
+                # I/O error - serial connection issue
+                print(f"  I/O Error: {e} - Check USB connection")
+                return None
             except UnicodeDecodeError as e:
-                print(f"  Decode error on attempt {attempt + 1}: {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(0.2)
+                    time.sleep(0.1)
                     continue
                 return None
             except Exception as e:
-                print(f"  Error sending command: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(0.2)
-                    continue
+                print(f"  Unexpected error: {type(e).__name__}: {e}")
                 return None
         
         return None
@@ -197,20 +200,26 @@ class TrainMonitor:
     def update_temperatures(self):
         """Continuously update temperatures from all coaches"""
         for coach_id in self.train_order:
-            response = self.send_command(f"TEMP,{coach_id}")
-            
-            if response and response != "ERROR":
-                try:
-                    parts = response.split(',')
-                    if len(parts) >= 4:
-                        temp = float(parts[3])
-                        self.coaches[coach_id].temperature = temp
-                        # Optional: Print to console for debugging
-                        # print(f"C{coach_id}: {temp:.1f}°C")
-                except (ValueError, IndexError) as e:
-                    print(f"Temp parse error for C{coach_id}: {e}")
-            else:
-                print(f"No temperature data from C{coach_id}")
+            try:
+                response = self.send_command(f"TEMP,{coach_id}")
+                
+                if response and response != "ERROR":
+                    try:
+                        parts = response.split(',')
+                        if len(parts) >= 4:
+                            temp = float(parts[3])
+                            self.coaches[coach_id].temperature = temp
+                            print(f"✓ C{coach_id}: {temp:.1f}°C")
+                        else:
+                            print(f"⚠ C{coach_id}: Invalid format - {response}")
+                    except (ValueError, IndexError) as e:
+                        print(f"⚠ C{coach_id}: Parse error - {e}")
+                else:
+                    print(f"⚠ C{coach_id}: No response")
+            except Exception as e:
+                print(f"⚠ C{coach_id}: Communication error - {e}")
+                # Don't break the loop, try next coach
+                continue
     
     def get_temp_color(self, temp):
         """Determine color based on temperature"""
@@ -312,9 +321,18 @@ class TrainMonitor:
     def draw_train(self):
         """Draw train as linked list"""
         if not self.mapped:
+            self.canvas.create_text(
+                440, 225,
+                text="Train not mapped yet...",
+                font=("Arial", 14),
+                fill='white'
+            )
             return
         
         self.canvas.delete("all")
+        
+        # Debug: Show we're drawing
+        print(f"[GUI] Drawing {len(self.train_order)} coaches")
         
         num_coaches = len(self.train_order)
         if num_coaches == 0:
@@ -335,6 +353,8 @@ class TrainMonitor:
             temp = node.temperature
             color = self.get_temp_color(temp)
             status = self.get_temp_status(temp)
+            
+            print(f"[GUI] C{coach_id}: Temp={temp}, Color={color}")
             
             # Node rectangle
             self.canvas.create_rectangle(
@@ -421,13 +441,19 @@ class TrainMonitor:
             status_color = "#00FF00"
         
         self.status_label.config(text=status_text, fg=status_color)
+        print(f"[GUI] Status: {status_text}\n")
     
     def monitoring_loop(self):
         """Background monitoring thread"""
+        print("\n🔄 Starting temperature monitoring loop...\n")
+        cycle = 0
         while self.running:
             if self.mapped:
+                cycle += 1
+                print(f"--- Monitoring Cycle {cycle} ---")
                 self.update_temperatures()
                 self.root.after(0, self.draw_train)
+                print()
             time.sleep(2)
     
     def run(self):
