@@ -192,12 +192,18 @@ class TrainMonitor:
             print("✗ No coaches detected!")
             return False
         
-        # Check if C3 is present
+        # Clear previous topology
+        self.coaches.clear()
+        
+        # Determine configuration based on which coaches are present
+        has_c0 = 0 in self.detected_coaches
+        has_c1 = 1 in self.detected_coaches
+        has_c2 = 2 in self.detected_coaches
         has_c3 = 3 in self.detected_coaches
         
-        if has_c3:
-            # Configuration: C0 → C1 → C3 → C2
-            print("Configuration: C0 → C1 → C3 → C2 (4 coaches)")
+        # CASE 1: Only C0 and C1 present (2 coaches)
+        if has_c0 and has_c1 and not has_c2 and not has_c3:
+            print("Configuration: C0 → C1 (2 coaches)")
             print()
             
             # Create Coach 0
@@ -206,24 +212,14 @@ class TrainMonitor:
             print(f"  ✓ Coach 0: NULL ← [C0] → C1")
             
             # Create Coach 1
-            node1 = CoachNode(coach_id=1, left_id=0, right_id=3)
+            node1 = CoachNode(coach_id=1, left_id=0, right_id=-1)
             self.coaches[1] = node1
-            print(f"  ✓ Coach 1: C0 ← [C1] → C3")
+            print(f"  ✓ Coach 1: C0 ← [C1] → NULL")
             
-            # Create Coach 3 (NEW - inserted between C1 and C2)
-            node3 = CoachNode(coach_id=3, left_id=1, right_id=2)
-            self.coaches[3] = node3
-            print(f"  ✓ Coach 3: C1 ← [C3] → C2 (NEW COACH INSERTED)")
-            
-            # Create Coach 2
-            node2 = CoachNode(coach_id=2, left_id=3, right_id=-1)
-            self.coaches[2] = node2
-            print(f"  ✓ Coach 2: C3 ← [C2] → NULL")
-            
-            self.train_order = [0, 1, 3, 2]
-            
-        else:
-            # Configuration: C0 → C1 → C2
+            self.train_order = [0, 1]
+        
+        # CASE 2: C0, C1, C2 present (3 coaches, no C3)
+        elif has_c0 and has_c1 and has_c2 and not has_c3:
             print("Configuration: C0 → C1 → C2 (3 coaches)")
             print()
             
@@ -243,6 +239,54 @@ class TrainMonitor:
             print(f"  ✓ Coach 2: C1 ← [C2] → NULL")
             
             self.train_order = [0, 1, 2]
+        
+        # CASE 3: All coaches present including C3 (4 coaches)
+        elif has_c0 and has_c1 and has_c2 and has_c3:
+            print("Configuration: C0 → C1 → C3 → C2 (4 coaches)")
+            print()
+            
+            # Create Coach 0
+            node0 = CoachNode(coach_id=0, left_id=-1, right_id=1)
+            self.coaches[0] = node0
+            print(f"  ✓ Coach 0: NULL ← [C0] → C1")
+            
+            # Create Coach 1
+            node1 = CoachNode(coach_id=1, left_id=0, right_id=3)
+            self.coaches[1] = node1
+            print(f"  ✓ Coach 1: C0 ← [C1] → C3")
+            
+            # Create Coach 3 (NEW - inserted between C1 and C2)
+            node3 = CoachNode(coach_id=3, left_id=1, right_id=2)
+            self.coaches[3] = node3
+            print(f"  ✓ Coach 3: C1 ← [C3] → C2 ⭐ NEW COACH")
+            
+            # Create Coach 2
+            node2 = CoachNode(coach_id=2, left_id=3, right_id=-1)
+            self.coaches[2] = node2
+            print(f"  ✓ Coach 2: C3 ← [C2] → NULL")
+            
+            self.train_order = [0, 1, 3, 2]
+        
+        # CASE 4: Other combinations (fallback - minimal train)
+        else:
+            print(f"⚠ Unusual configuration detected: {sorted(self.detected_coaches)}")
+            print("Building minimal train with detected coaches...")
+            print()
+            
+            # Build a simple chain with whatever we have
+            detected_list = sorted(self.detected_coaches)
+            for i, coach_id in enumerate(detected_list):
+                left_id = detected_list[i-1] if i > 0 else -1
+                right_id = detected_list[i+1] if i < len(detected_list)-1 else -1
+                
+                node = CoachNode(coach_id=coach_id, left_id=left_id, right_id=right_id)
+                self.coaches[coach_id] = node
+                
+                left_str = f"C{left_id}" if left_id != -1 else "NULL"
+                right_str = f"C{right_id}" if right_id != -1 else "NULL"
+                print(f"  ✓ Coach {coach_id}: {left_str} ← [C{coach_id}] → {right_str}")
+            
+            self.train_order = detected_list
         
         print()
         print("=" * 60)
@@ -414,17 +458,29 @@ class TrainMonitor:
         
         # Dynamic layout based on number of coaches
         if num_coaches == 4:
-            # 4 coaches - tighter spacing
-            node_width = 75
+            # 4 coaches - tightest spacing
+            node_width = 70
             node_height = 75
-            spacing = 100
-            start_x = 20
-        else:
-            # 3 coaches - more spacing
+            spacing = 95
+            start_x = 15
+            font_size_temp = 9
+            font_size_label = 8
+        elif num_coaches == 3:
+            # 3 coaches - medium spacing
             node_width = 90
             node_height = 80
             spacing = 120
             start_x = 40
+            font_size_temp = 10
+            font_size_label = 9
+        else:  # 2 coaches
+            # 2 coaches - most spacing
+            node_width = 110
+            node_height = 90
+            spacing = 140
+            start_x = 60
+            font_size_temp = 12
+            font_size_label = 10
         
         y = 120
         
@@ -437,7 +493,7 @@ class TrainMonitor:
             color = self.get_temp_color(temp)
             status = self.get_temp_status(temp)
             
-            # Highlight C3 if present
+            # Highlight C3 with yellow outline if present
             outline_color = 'yellow' if coach_id == 3 else 'white'
             outline_width = 3 if coach_id == 3 else 2
             
@@ -452,9 +508,9 @@ class TrainMonitor:
             
             # Coach label
             self.canvas.create_text(
-                x + node_width//2, y - 25,
+                x + node_width//2, y - 28,
                 text=f"C{coach_id}",
-                font=("Arial", 9, "bold"),
+                font=("Arial", font_size_label, "bold"),
                 fill='black'
             )
             
@@ -463,14 +519,14 @@ class TrainMonitor:
             self.canvas.create_text(
                 x + node_width//2, y - 5,
                 text=temp_text,
-                font=("Arial", 10, "bold"),
+                font=("Arial", font_size_temp, "bold"),
                 fill='black'
             )
             
             # Status
             status_short = status[:4]
             self.canvas.create_text(
-                x + node_width//2, y + 15,
+                x + node_width//2, y + 16,
                 text=status_short,
                 font=("Arial", 6, "bold"),
                 fill='black'
@@ -479,14 +535,14 @@ class TrainMonitor:
             # Left pointer
             if node.left_id != -1:
                 self.canvas.create_text(
-                    x + 8, y + 30,
+                    x + 8, y + 33,
                     text=f"←{node.left_id}",
                     font=("Arial", 6),
                     fill='#AAAAAA'
                 )
             else:
                 self.canvas.create_text(
-                    x + 8, y + 30,
+                    x + 8, y + 33,
                     text="←X",
                     font=("Arial", 6),
                     fill='#666666'
@@ -495,14 +551,14 @@ class TrainMonitor:
             # Right pointer
             if node.right_id != -1:
                 self.canvas.create_text(
-                    x + node_width - 8, y + 30,
+                    x + node_width - 8, y + 33,
                     text=f"{node.right_id}→",
                     font=("Arial", 6),
                     fill='#AAAAAA'
                 )
             else:
                 self.canvas.create_text(
-                    x + node_width - 8, y + 30,
+                    x + node_width - 8, y + 33,
                     text="X→",
                     font=("Arial", 6),
                     fill='#666666'
@@ -534,11 +590,20 @@ class TrainMonitor:
                            self.coaches[id].temperature >= 40)
         
         if critical_count > 0:
-            status_text = f"ALERT: {critical_count} CRITICAL!"
+            status_text = f"⚠ ALERT: {critical_count} CRITICAL!"
             status_color = "#FF0000"
         else:
-            config_text = "4-coach" if num_coaches == 4 else "3-coach"
-            status_text = f"{config_text} | {num_coaches} coaches - OK"
+            # Display configuration type
+            if num_coaches == 2:
+                config_text = "2-Coach"
+            elif num_coaches == 3:
+                config_text = "3-Coach"
+            elif num_coaches == 4:
+                config_text = "4-Coach (+C3)"
+            else:
+                config_text = f"{num_coaches}-Coach"
+            
+            status_text = f"{config_text} | All OK"
             status_color = "#00FF00"
         
         self.status_label.config(text=status_text, fg=status_color)
