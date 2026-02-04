@@ -3,6 +3,7 @@
 Hot Axle Monitoring System - Raspberry Pi Controller (HARDCODED MAP)
 Displays train as linked list with real-time temperature monitoring
 Hardcoded topology: C0 → C1 → C2
+Optimized for 3.5" TFT Display (480x320)
 """
 
 import serial
@@ -11,6 +12,10 @@ import tkinter as tk
 from tkinter import ttk
 import threading
 import sys
+import os
+
+# Set display for TFT screen
+os.environ['DISPLAY'] = ':0'
 
 class CoachNode:
     """Represents a coach in the linked list"""
@@ -244,87 +249,84 @@ class TrainMonitor:
             return "CRITICAL"
     
     def create_gui(self):
-        """Create visualization GUI"""
+        """Create visualization GUI for 3.5 inch TFT Display"""
         self.root = tk.Tk()
-        self.root.title("🚆 Hot Axle Monitoring - Linked List View")
-        self.root.geometry("900x650")
+        self.root.title("Hot Axle Monitor")
+        
+        # 3.5" TFT Display Resolution (typically 480x320)
+        self.root.geometry("480x320")
+        
+        # Fullscreen for TFT display
+        self.root.attributes('-fullscreen', True)
+        
+        # Set display to framebuffer if available
         self.root.configure(bg='#1a1a1a')
         
-        # Title
+        # Title - Compact for small screen
         title = tk.Label(
             self.root,
-            text="🚆 DISTRIBUTED HOT AXLE MONITORING SYSTEM",
-            font=("Arial", 18, "bold"),
-            bg='#1a1a1a',
-            fg='#00FF00'
-        )
-        title.pack(pady=15)
-        
-        # Subtitle
-        subtitle = tk.Label(
-            self.root,
-            text="Linked List Based Real-Time Temperature Monitoring",
-            font=("Arial", 11),
-            bg='#1a1a1a',
-            fg='#888888'
-        )
-        subtitle.pack()
-        
-        # Status
-        self.status_label = tk.Label(
-            self.root,
-            text="Status: Initializing...",
+            text="HOT AXLE MONITOR",
             font=("Arial", 11, "bold"),
             bg='#1a1a1a',
             fg='#00FF00'
         )
-        self.status_label.pack(pady=5)
+        title.pack(pady=3)
         
-        # Canvas
+        # Status - Compact
+        self.status_label = tk.Label(
+            self.root,
+            text="Status: Initializing...",
+            font=("Arial", 8, "bold"),
+            bg='#1a1a1a',
+            fg='#00FF00'
+        )
+        self.status_label.pack(pady=2)
+        
+        # Canvas - Sized for 480x320 display
         self.canvas = tk.Canvas(
             self.root,
-            width=880,
-            height=450,
+            width=470,
+            height=240,
             bg='#0d0d0d',
-            highlightthickness=2,
+            highlightthickness=1,
             highlightbackground='#333333'
         )
-        self.canvas.pack(pady=10)
+        self.canvas.pack(pady=3)
         
-        # Legend
+        # Legend - Compact
         legend_frame = tk.Frame(self.root, bg='#1a1a1a')
-        legend_frame.pack(pady=5)
+        legend_frame.pack(pady=2)
         
         legends = [
-            ("#00FF00", "Normal (<30°C)"),
-            ("#FFD700", "Warning (30-40°C)"),
-            ("#FF0000", "Critical (>40°C)"),
-            ("#555555", "No Data")
+            ("#00FF00", "Normal"),
+            ("#FFD700", "Warn"),
+            ("#FF0000", "Crit"),
+            ("#555555", "N/A")
         ]
         
         for color, text in legends:
             tk.Label(
                 legend_frame,
-                text="◼",
+                text="■",
                 fg=color,
                 bg='#1a1a1a',
-                font=("Arial", 16)
-            ).pack(side=tk.LEFT, padx=3)
+                font=("Arial", 10)
+            ).pack(side=tk.LEFT, padx=2)
             tk.Label(
                 legend_frame,
                 text=text,
                 fg="white",
                 bg='#1a1a1a',
-                font=("Arial", 10)
-            ).pack(side=tk.LEFT, padx=8)
+                font=("Arial", 7)
+            ).pack(side=tk.LEFT, padx=3)
     
     def draw_train(self):
-        """Draw train as linked list"""
+        """Draw train as linked list - Optimized for 480x320 TFT"""
         if not self.mapped:
             self.canvas.create_text(
-                440, 225,
+                235, 120,
                 text="Train not mapped yet...",
-                font=("Arial", 14),
+                font=("Arial", 10),
                 fill='white'
             )
             return
@@ -338,12 +340,12 @@ class TrainMonitor:
         if num_coaches == 0:
             return
         
-        # Calculate layout
-        node_width = 140
-        node_height = 120
-        spacing = 180
-        start_x = 100
-        y = 220
+        # Layout optimized for 480x320 display
+        node_width = 90
+        node_height = 80
+        spacing = 120
+        start_x = 40
+        y = 120
         
         # Draw each coach
         for i, coach_id in enumerate(self.train_order):
@@ -362,51 +364,66 @@ class TrainMonitor:
                 x + node_width, y + node_height//2,
                 fill=color,
                 outline='white',
-                width=3
+                width=2
             )
             
             # Coach label
             self.canvas.create_text(
-                x + node_width//2, y - 40,
-                text=f"COACH {coach_id}",
-                font=("Arial", 13, "bold"),
-                fill='black'
-            )
-            
-            # Temperature
-            temp_text = f"{temp:.1f}°C" if temp is not None else "---"
-            self.canvas.create_text(
-                x + node_width//2, y - 5,
-                text=temp_text,
-                font=("Arial", 16, "bold"),
-                fill='black'
-            )
-            
-            # Status
-            self.canvas.create_text(
-                x + node_width//2, y + 20,
-                text=status,
+                x + node_width//2, y - 25,
+                text=f"C{coach_id}",
                 font=("Arial", 9, "bold"),
                 fill='black'
             )
             
-            # Left pointer
-            left_text = f"← {node.left_id}" if node.left_id != -1 else "← NULL"
+            # Temperature
+            temp_text = f"{temp:.1f}°" if temp is not None else "---"
             self.canvas.create_text(
-                x + 15, y + 45,
-                text=left_text,
-                font=("Arial", 9),
-                fill='#AAAAAA'
+                x + node_width//2, y - 5,
+                text=temp_text,
+                font=("Arial", 11, "bold"),
+                fill='black'
             )
             
-            # Right pointer
-            right_text = f"{node.right_id} →" if node.right_id != -1 else "NULL →"
+            # Status
+            status_short = status[:4]  # NORM, WARN, CRIT, N/A
             self.canvas.create_text(
-                x + node_width - 15, y + 45,
-                text=right_text,
-                font=("Arial", 9),
-                fill='#AAAAAA'
+                x + node_width//2, y + 15,
+                text=status_short,
+                font=("Arial", 7, "bold"),
+                fill='black'
             )
+            
+            # Left pointer
+            if node.left_id != -1:
+                self.canvas.create_text(
+                    x + 8, y + 32,
+                    text=f"←{node.left_id}",
+                    font=("Arial", 7),
+                    fill='#AAAAAA'
+                )
+            else:
+                self.canvas.create_text(
+                    x + 8, y + 32,
+                    text="←X",
+                    font=("Arial", 7),
+                    fill='#666666'
+                )
+            
+            # Right pointer
+            if node.right_id != -1:
+                self.canvas.create_text(
+                    x + node_width - 8, y + 32,
+                    text=f"{node.right_id}→",
+                    font=("Arial", 7),
+                    fill='#AAAAAA'
+                )
+            else:
+                self.canvas.create_text(
+                    x + node_width - 8, y + 32,
+                    text="X→",
+                    font=("Arial", 7),
+                    fill='#666666'
+                )
             
             # Arrow to next
             if i < num_coaches - 1:
@@ -418,26 +435,26 @@ class TrainMonitor:
                     arrow_end_x, y,
                     arrow=tk.LAST,
                     fill='#00FF00',
-                    width=4
+                    width=3
                 )
                 
                 self.canvas.create_text(
-                    (arrow_start_x + arrow_end_x) // 2, y - 15,
+                    (arrow_start_x + arrow_end_x) // 2, y - 10,
                     text="next",
-                    font=("Arial", 8, "italic"),
+                    font=("Arial", 6, "italic"),
                     fill='#888888'
                 )
         
-        # Update status
+        # Update status - More compact
         critical_count = sum(1 for id in self.train_order 
                            if self.coaches[id].temperature and 
                            self.coaches[id].temperature >= 40)
         
         if critical_count > 0:
-            status_text = f"⚠ ALERT: {critical_count} coach(es) in CRITICAL state!"
+            status_text = f"ALERT: {critical_count} CRITICAL!"
             status_color = "#FF0000"
         else:
-            status_text = f"✓ Monitoring {num_coaches} coaches - All systems normal"
+            status_text = f"Monitoring {num_coaches} coaches - OK"
             status_color = "#00FF00"
         
         self.status_label.config(text=status_text, fg=status_color)
