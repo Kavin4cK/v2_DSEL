@@ -360,9 +360,19 @@ class TrainMonitor:
         self.root = tk.Tk()
         self.root.title("Hot Axle Monitoring System - Linked List Visualization")
         
-        # Full HD resolution - maximize window
+        # Full HD resolution
         self.root.geometry("1920x1080")
-        self.root.state('zoomed')  # Maximize window
+
+        # --- FIX: Linux/Raspberry Pi compatible maximize ---
+        # 'zoomed' is Windows-only; use attributes('-zoomed', True) on Linux
+        try:
+            self.root.attributes('-zoomed', True)   # Works on Linux / Raspberry Pi OS
+        except tk.TclError:
+            try:
+                self.root.state('zoomed')           # Fallback for Windows
+            except tk.TclError:
+                self.root.geometry("1920x1080")     # Last resort: fixed size
+        # ---------------------------------------------------
         
         self.root.configure(bg='#0a0a0a')
         
