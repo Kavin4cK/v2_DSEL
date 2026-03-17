@@ -22,7 +22,7 @@ class CoachNode:
         self.next        = None
 
 class TrainMonitor:
-    def __init__(self, port='/dev/ttyUSB0', baudrate=9600):
+    def __init__(self, port='/dev/ttyUSB0', baudrate=115200):
         self.serial_port = None
         self.port        = port
         self.baudrate    = baudrate
@@ -294,4 +294,4 @@ class TrainMonitor:
 
 if __name__ == "__main__":
     port = sys.argv[1] if len(sys.argv) > 1 else '/dev/ttyUSB0'
-    TrainMonitor(port=port, baudrate=9600).run()
+    TrainMonitor(port=port, baudrate=115200).run()
