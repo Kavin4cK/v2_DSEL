@@ -1,0 +1,13 @@
+python3 -c "
+import serial, time
+print('Opening port...')
+s = serial.Serial('/dev/ttyUSB0', 9600, timeout=10)
+print('Port open — waiting for data...')
+start = time.time()
+while time.time() - start < 10:
+    line = s.readline().decode('utf-8', errors='ignore').strip()
+    if line:
+        print(repr(line))
+s.close()
+print('Done')
+"
