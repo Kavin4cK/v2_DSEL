@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
 ============================================================
- HOT AXLE MONITORING SYSTEM
- Raspberry Pi Display Controller
+ HOT AXLE MONITORING SYSTEM — Raspberry Pi
+ 3.5" SPI TFT (ILI9486)  480x320
 ============================================================
- Display : 3.5" SPI TFT (ILI9486 / XPT2046)  480×320
- Serial  : Gateway Nano via USB (/dev/ttyUSB0, 9600 baud)
+ How it works:
+   1. On startup: probe TEMP,0 through TEMP,4
+      Collect every ID that replies without ERROR
+   2. Sort responders ascending → build linked list
+   3. Poll each in order, update temps, refresh GUI
+   4. Missing coaches are simply not shown
+   5. Re-probes every 30s to detect newly added coaches
 
- Protocol from gateway:
-   "READY"          → gateway is online
-   "TEMP,<id>,<t>"  → coach <id> temperature reading
-   "ERROR,<id>"     → coach <id> sensor fault
-
- Coach display:
-   - Only coaches that have reported in are shown
-   - Always sorted ascending by ID (1 → 5)
-   - Color coding: green / yellow / red / grey
+ Pi sends    → "TEMP,<id>\n"
+ Gateway replies:
+   success   → "<left>,<id>,<right>,<temp>\n"
+   error     → "ERROR\n"
 ============================================================
 """
 
@@ -23,52 +23,48 @@ import serial
 import threading
 import time
 import sys
-import os
-
 import tkinter as tk
 from tkinter import font as tkfont
 
-# ── Display Resolution ───────────────────────────────────────
-# ILI9486 SPI TFT is 480×320 (landscape)
-DISPLAY_W = 480
-DISPLAY_H = 320
-
-# ── Temperature Thresholds ───────────────────────────────────
-TEMP_NORMAL   = 30.0   # Below this → Normal (green)
-TEMP_WARNING  = 40.0   # Below this → Warning (yellow)
-                       # At or above → Critical (red)
-
-# ── Serial Config ────────────────────────────────────────────
+# ── Config ───────────────────────────────────────────────────
+DISPLAY_W    = 480
+DISPLAY_H    = 320
 DEFAULT_PORT = "/dev/ttyUSB0"
 BAUDRATE     = 9600
+ALL_IDS      = [0, 1, 2, 3, 4]
+PROBE_EVERY  = 30       # re-probe for new coaches every N seconds
+POLL_DELAY   = 0.3      # seconds between each coach query
 
-# ── Colours ─────────────────────────────────────────────────
+TEMP_NORMAL  = 30.0
+TEMP_WARNING = 40.0
+
+# ── Colours ──────────────────────────────────────────────────
 BG          = "#0A0A0F"
 PANEL_BG    = "#12121A"
 HEADER_BG   = "#0D1B2A"
 ACCENT      = "#1E90FF"
 COL_NORMAL  = "#00E676"
-COL_WARNING = "#FFD600"
+COL_WARN    = "#FFD600"
 COL_CRIT    = "#FF1744"
-COL_NODATA  = "#424242"
-COL_TEXT_DK = "#0A0A0F"
-COL_TEXT_LT = "#E0E0E0"
-COL_DIM     = "#555566"
+COL_NODATA  = "#555566"
+COL_DK      = "#0A0A0F"
+COL_LT      = "#E0E0E0"
+COL_DIM     = "#445566"
 COL_ARROW   = "#1E90FF"
+COL_GW      = "#7B61FF"   # gateway node accent colour
 
 # ─────────────────────────────────────────────────────────────
 class CoachNode:
-    """Single node in the sorted linked list of coaches."""
-    def __init__(self, coach_id: int):
-        self.coach_id   = coach_id
-        self.temperature: float | None = None
-        self.status     = "NO DATA"   # NORMAL / WARNING / CRITICAL / ERROR / NO DATA
-        self.last_seen  = 0.0         # epoch time of last update
-        self.next: "CoachNode | None" = None
+    def __init__(self, coach_id, left_id, right_id):
+        self.coach_id    = coach_id
+        self.left_id     = left_id
+        self.right_id    = right_id
+        self.temperature = None
+        self.status      = "WAITING"
+        self.next        = None
 
-    def update(self, temp: float | None):
+    def update_temp(self, temp: float | None):
         self.temperature = temp
-        self.last_seen   = time.time()
         if temp is None:
             self.status = "ERROR"
         elif temp < TEMP_NORMAL:
@@ -79,417 +75,358 @@ class CoachNode:
             self.status = "CRITICAL"
 
     @property
-    def color(self) -> str:
+    def color(self):
         return {
             "NORMAL":   COL_NORMAL,
-            "WARNING":  COL_WARNING,
+            "WARNING":  COL_WARN,
             "CRITICAL": COL_CRIT,
+            "WAITING":  COL_NODATA,
             "ERROR":    COL_NODATA,
-            "NO DATA":  COL_NODATA,
         }.get(self.status, COL_NODATA)
 
     @property
-    def temp_str(self) -> str:
+    def temp_str(self):
         if self.temperature is None:
             return "---"
-        return f"{self.temperature:.1f}°"
+        return f"{self.temperature:.1f}\u00b0"
 
 # ─────────────────────────────────────────────────────────────
-class CoachLinkedList:
+class TrainMonitor(threading.Thread):
     """
-    Sorted singly-linked list of coach nodes.
-    Insertion always keeps ascending order by coach_id.
+    Background thread:
+      - Maintains serial connection to gateway
+      - Probes which coaches are present
+      - Continuously polls temps and updates node list
     """
-    def __init__(self):
-        self.head: CoachNode | None = None
-        self._lock = threading.Lock()
-
-    def _insert(self, coach_id: int) -> CoachNode:
-        """Insert a new node in sorted position (ascending ID)."""
-        new_node = CoachNode(coach_id)
-        if self.head is None or self.head.coach_id > coach_id:
-            new_node.next = self.head
-            self.head = new_node
-            return new_node
-        curr = self.head
-        while curr.next and curr.next.coach_id < coach_id:
-            curr = curr.next
-        new_node.next = curr.next
-        curr.next = new_node
-        return new_node
-
-    def get_or_create(self, coach_id: int) -> CoachNode:
-        with self._lock:
-            curr = self.head
-            while curr:
-                if curr.coach_id == coach_id:
-                    return curr
-                curr = curr.next
-            return self._insert(coach_id)
-
-    def as_list(self) -> list[CoachNode]:
-        with self._lock:
-            result, curr = [], self.head
-            while curr:
-                result.append(curr)
-                curr = curr.next
-            return result
-
-    def count(self) -> int:
-        return len(self.as_list())
-
-# ─────────────────────────────────────────────────────────────
-class SerialReader(threading.Thread):
-    """
-    Background thread — reads gateway serial output and
-    updates the shared CoachLinkedList.
-    """
-    def __init__(self, port: str, coaches: CoachLinkedList,
-                 on_ready, on_error):
+    def __init__(self, port: str):
         super().__init__(daemon=True)
-        self.port     = port
-        self.coaches  = coaches
-        self.on_ready = on_ready
-        self.on_error = on_error
-        self._ser: serial.Serial | None = None
-        self.connected = False
+        self.port       = port
+        self._ser       = None
+        self._lock      = threading.Lock()
+        self._nodes     = []          # sorted list of CoachNode
+        self.status_msg = "Connecting..."
+        self.connected  = False
+        self._last_probe = 0.0
 
+    # ── Public read ──────────────────────────────────────────
+    def get_nodes(self) -> list[CoachNode]:
+        with self._lock:
+            return list(self._nodes)
+
+    # ── Thread entry ─────────────────────────────────────────
     def run(self):
         while True:
             try:
                 self._connect()
-                self._read_loop()
+                self._main_loop()
             except Exception as e:
-                self.connected = False
-                self.on_error(f"Serial error: {e}")
+                self.connected  = False
+                self.status_msg = f"Reconnecting... ({e})"
+                try:
+                    if self._ser:
+                        self._ser.close()
+                except Exception:
+                    pass
                 time.sleep(3)
 
+    # ── Connect ──────────────────────────────────────────────
     def _connect(self):
-        self.on_error("Connecting to gateway...")
+        self.status_msg = f"Connecting to {self.port}..."
         self._ser = serial.Serial(self.port, BAUDRATE, timeout=2)
         time.sleep(2)
         self._ser.reset_input_buffer()
 
+        self.status_msg = "Waiting for READY..."
         deadline = time.time() + 15
         while time.time() < deadline:
             raw = self._ser.readline()
             if raw:
                 line = raw.decode("utf-8", errors="ignore").strip()
                 if line == "READY":
-                    self.connected = True
-                    self.on_ready()
+                    self.connected  = True
+                    self.status_msg = "Probing coaches..."
                     return
-        raise ConnectionError("Gateway did not send READY within 15 s")
+        raise ConnectionError("Gateway did not send READY")
 
-    def _read_loop(self):
+    # ── Main poll loop ───────────────────────────────────────
+    def _main_loop(self):
         while True:
+            now = time.time()
+
+            # Re-probe periodically
+            if now - self._last_probe >= PROBE_EVERY:
+                self._probe_coaches()
+                self._last_probe = time.time()
+
+            # Poll each active coach
+            nodes = self.get_nodes()
+            if not nodes:
+                self.status_msg = "No coaches responding"
+                time.sleep(1)
+                continue
+
+            for node in nodes:
+                self._poll_temp(node)
+                time.sleep(POLL_DELAY)
+
+    # ── Probe which coaches exist ────────────────────────────
+    def _probe_coaches(self):
+        self.status_msg = "Probing coaches..."
+        found = []
+
+        for cid in ALL_IDS:
+            reply = self._send_temp_request(cid)
+            if reply is None:
+                continue
+            left_id, curr_id, right_id, temp = reply
+            node = CoachNode(curr_id, left_id, right_id)
+            node.update_temp(temp)
+            found.append(node)
+            time.sleep(0.1)
+
+        # Sort ascending by ID and rebuild linked list
+        found.sort(key=lambda n: n.coach_id)
+        for i, node in enumerate(found):
+            node.next = found[i + 1] if i + 1 < len(found) else None
+
+        with self._lock:
+            self._nodes = found
+
+        ids = [f"C{n.coach_id}" for n in found]
+        self.status_msg = f"Active: {' → '.join(ids)}" if ids else "No coaches found"
+
+    # ── Poll one coach temperature ───────────────────────────
+    def _poll_temp(self, node: CoachNode):
+        reply = self._send_temp_request(node.coach_id)
+        if reply is None:
+            return
+        _, _, _, temp = reply
+        node.update_temp(temp)
+
+    # ── Send TEMP,<id> and parse reply ───────────────────────
+    def _send_temp_request(self, coach_id: int):
+        """
+        Returns (left_id, curr_id, right_id, temp) or None on failure.
+        """
+        try:
+            self._ser.reset_input_buffer()
+            self._ser.write(f"TEMP,{coach_id}\n".encode())
+            self._ser.flush()
+
             raw = self._ser.readline()
             if not raw:
-                continue
+                return None
+
             line = raw.decode("utf-8", errors="ignore").strip()
-            if not line:
-                continue
+            if not line or line == "ERROR":
+                return None
 
             parts = line.split(",")
+            if len(parts) != 4:
+                return None
 
-            if parts[0] == "TEMP" and len(parts) == 3:
-                try:
-                    cid  = int(parts[1])
-                    temp = float(parts[2])
-                    node = self.coaches.get_or_create(cid)
-                    node.update(temp)
-                except ValueError:
-                    pass
+            left_id  = int(parts[0])
+            curr_id  = int(parts[1])
+            right_id = int(parts[2])
+            temp     = float(parts[3])
+            return (left_id, curr_id, right_id, temp)
 
-            elif parts[0] == "ERROR" and len(parts) == 2:
-                try:
-                    cid  = int(parts[1])
-                    node = self.coaches.get_or_create(cid)
-                    node.update(None)
-                except ValueError:
-                    pass
+        except Exception:
+            return None
+
 
 # ─────────────────────────────────────────────────────────────
-class HotAxleApp:
-    """Main GUI — optimised for 480×320 SPI TFT."""
+class HotAxleGUI:
+    REFRESH_MS = 800
 
-    REFRESH_MS = 1000   # redraw interval
+    def __init__(self, monitor: TrainMonitor):
+        self.monitor = monitor
 
-    def __init__(self, port: str):
-        self.coaches    = CoachLinkedList()
-        self.sys_status = "Connecting..."
-        self.gateway_ok = False
-
-        # ── Root window ──────────────────────────────────────
         self.root = tk.Tk()
         self.root.title("Hot Axle Monitor")
         self.root.geometry(f"{DISPLAY_W}x{DISPLAY_H}+0+0")
         self.root.resizable(False, False)
         self.root.configure(bg=BG)
-        self.root.overrideredirect(True)   # fullscreen borderless on Pi
+        self.root.overrideredirect(True)     # borderless fullscreen on Pi
+        try:
+            self.root.attributes("-zoomed", True)
+        except Exception:
+            pass
 
-        self._build_fonts()
-        self._build_ui()
-
-        # ── Serial reader ────────────────────────────────────
-        self.reader = SerialReader(
-            port    = port,
-            coaches = self.coaches,
-            on_ready= self._on_gateway_ready,
-            on_error= self._on_serial_error,
-        )
-        self.reader.start()
-
-        # ── Start refresh loop ───────────────────────────────
+        self._fonts()
+        self._build()
         self.root.after(self.REFRESH_MS, self._refresh)
 
-    # ── Font setup ───────────────────────────────────────────
-    def _build_fonts(self):
-        self.f_title    = tkfont.Font(family="DejaVu Sans", size=11, weight="bold")
-        self.f_subtitle = tkfont.Font(family="DejaVu Sans", size=7)
-        self.f_id       = tkfont.Font(family="DejaVu Sans Mono", size=9,  weight="bold")
-        self.f_temp     = tkfont.Font(family="DejaVu Sans Mono", size=16, weight="bold")
-        self.f_status   = tkfont.Font(family="DejaVu Sans", size=7, weight="bold")
-        self.f_ptr      = tkfont.Font(family="DejaVu Sans Mono", size=6)
-        self.f_legend   = tkfont.Font(family="DejaVu Sans", size=7)
-        self.f_sys      = tkfont.Font(family="DejaVu Sans", size=7)
+    # ── Fonts ────────────────────────────────────────────────
+    def _fonts(self):
+        self.f_hdr    = tkfont.Font(family="DejaVu Sans",      size=10, weight="bold")
+        self.f_sub    = tkfont.Font(family="DejaVu Sans",      size=7)
+        self.f_id     = tkfont.Font(family="DejaVu Sans Mono", size=9,  weight="bold")
+        self.f_temp   = tkfont.Font(family="DejaVu Sans Mono", size=16, weight="bold")
+        self.f_status = tkfont.Font(family="DejaVu Sans",      size=7,  weight="bold")
+        self.f_ptr    = tkfont.Font(family="DejaVu Sans Mono", size=6)
+        self.f_leg    = tkfont.Font(family="DejaVu Sans",      size=7)
 
-    # ── Static UI skeleton ───────────────────────────────────
-    def _build_ui(self):
-        # ── Header bar (480 × 38) ────────────────────────────
-        self.header = tk.Frame(self.root, bg=HEADER_BG,
-                               width=DISPLAY_W, height=38)
-        self.header.place(x=0, y=0)
-
-        tk.Label(self.header, text="◈  HOT AXLE MONITORING SYSTEM",
-                 font=self.f_title, bg=HEADER_BG, fg=ACCENT
-                 ).place(x=8, y=4)
-
-        tk.Label(self.header, text="Real-Time I2C Linked-List Railway Safety Monitor",
-                 font=self.f_subtitle, bg=HEADER_BG, fg=COL_DIM
-                 ).place(x=10, y=22)
-
-        self.lbl_clock = tk.Label(self.header, text="",
-                                  font=self.f_subtitle,
+    # ── Static layout ────────────────────────────────────────
+    def _build(self):
+        # Header  480 × 36
+        hdr = tk.Frame(self.root, bg=HEADER_BG, height=36)
+        hdr.place(x=0, y=0, width=DISPLAY_W)
+        tk.Label(hdr, text="HOT AXLE MONITORING SYSTEM",
+                 font=self.f_hdr, bg=HEADER_BG, fg=ACCENT).place(x=8, y=3)
+        tk.Label(hdr, text="Hardcoded topology  |  auto-sorted ascending",
+                 font=self.f_sub, bg=HEADER_BG, fg=COL_DIM).place(x=10, y=20)
+        self.lbl_clock = tk.Label(hdr, text="", font=self.f_sub,
                                   bg=HEADER_BG, fg=COL_DIM)
-        self.lbl_clock.place(x=390, y=4)
+        self.lbl_clock.place(x=388, y=3)
 
-        # ── Canvas for linked-list visualisation (480 × 230) ─
-        self.canvas = tk.Canvas(self.root,
-                                width=DISPLAY_W, height=230,
-                                bg=PANEL_BG, highlightthickness=0)
-        self.canvas.place(x=0, y=38)
+        # Canvas  480 × 232
+        self.cv = tk.Canvas(self.root, width=DISPLAY_W, height=232,
+                            bg=PANEL_BG, highlightthickness=0)
+        self.cv.place(x=0, y=36)
 
-        # ── Footer bar (480 × 52) ────────────────────────────
-        self.footer = tk.Frame(self.root, bg=HEADER_BG,
-                               width=DISPLAY_W, height=52)
-        self.footer.place(x=0, y=268)
+        # Footer  480 × 52
+        ftr = tk.Frame(self.root, bg=HEADER_BG, height=52)
+        ftr.place(x=0, y=268, width=DISPLAY_W)
 
-        # Legend dots
-        legend_data = [
-            (COL_NORMAL,  "Normal <30°C"),
-            (COL_WARNING, "Warning 30–40°C"),
-            (COL_CRIT,    "Critical >40°C"),
-            (COL_NODATA,  "No Data / Error"),
-        ]
-        lx = 8
-        for col, label in legend_data:
-            tk.Label(self.footer, text="●", fg=col,
-                     bg=HEADER_BG, font=self.f_legend
-                     ).place(x=lx, y=4)
-            tk.Label(self.footer, text=label, fg=COL_TEXT_LT,
-                     bg=HEADER_BG, font=self.f_legend
-                     ).place(x=lx + 14, y=4)
-            lx += 116
+        lx = 6
+        for col, txt in [(COL_NORMAL, "Normal <30°"),
+                         (COL_WARN,   "Warning 30-40°"),
+                         (COL_CRIT,   "Critical >40°"),
+                         (COL_NODATA, "No data")]:
+            tk.Label(ftr, text="●", fg=col, bg=HEADER_BG,
+                     font=self.f_leg).place(x=lx, y=4)
+            tk.Label(ftr, text=txt, fg=COL_LT, bg=HEADER_BG,
+                     font=self.f_leg).place(x=lx + 13, y=4)
+            lx += 118
 
-        # System status label
-        self.lbl_status = tk.Label(
-            self.footer, text="Status: Initialising...",
-            font=self.f_sys, bg=HEADER_BG, fg=COL_TEXT_LT,
-            wraplength=460, justify="left"
-        )
-        self.lbl_status.place(x=8, y=26)
+        self.lbl_alert = tk.Label(ftr, text="", font=self.f_leg,
+                                  bg=HEADER_BG, fg=COL_LT,
+                                  wraplength=464, justify="left")
+        self.lbl_alert.place(x=6, y=24)
 
-    # ── Callbacks ────────────────────────────────────────────
-    def _on_gateway_ready(self):
-        self.gateway_ok = True
-        self.sys_status = "Gateway connected — waiting for coaches..."
-
-    def _on_serial_error(self, msg: str):
-        self.gateway_ok = False
-        self.sys_status = msg
-
-    # ── Main refresh ─────────────────────────────────────────
+    # ── Refresh loop ─────────────────────────────────────────
     def _refresh(self):
         self._draw_canvas()
-        self._update_footer()
+        self._draw_footer()
         self.lbl_clock.config(text=time.strftime("%H:%M:%S"))
         self.root.after(self.REFRESH_MS, self._refresh)
 
-    # ── Canvas drawing ───────────────────────────────────────
+    # ── Canvas ───────────────────────────────────────────────
     def _draw_canvas(self):
-        self.canvas.delete("all")
-        nodes = self.coaches.as_list()   # already sorted ascending
+        self.cv.delete("all")
+        nodes = self.monitor.get_nodes()
 
         if not nodes:
-            self.canvas.create_text(
-                DISPLAY_W // 2, 115,
-                text="Waiting for coaches..." if self.gateway_ok
-                     else "Gateway not connected",
+            self.cv.create_text(
+                DISPLAY_W // 2, 116,
+                text=self.monitor.status_msg,
                 font=self.f_id, fill=COL_DIM
             )
             return
 
-        n = len(nodes)
+        n      = len(nodes)
+        NW     = min(74, (DISPLAY_W - 20) // n - 10)
+        NH     = 112
+        GAP    = max(8, (DISPLAY_W - 10 - n * NW) // max(n - 1, 1))
+        TOTAL  = n * NW + max(n - 1, 0) * GAP
+        sx     = (DISPLAY_W - TOTAL) // 2
+        cy     = 116
 
-        # ── Layout geometry ──────────────────────────────────
-        NODE_W   = min(74, (DISPLAY_W - 20) // n - 14)
-        NODE_H   = 110
-        ARROW_W  = max(10, (DISPLAY_W - 10 - n * NODE_W) // max(n - 1, 1))
-        TOTAL_W  = n * NODE_W + max(n - 1, 0) * ARROW_W
-        START_X  = (DISPLAY_W - TOTAL_W) // 2
-        CY       = 115   # vertical centre of canvas
+        for i, node in enumerate(nodes):
+            nx  = sx + i * (NW + GAP)
+            col = node.color
+            is_gw = (node.coach_id == 0)
 
-        for idx, node in enumerate(nodes):
-            nx = START_X + idx * (NODE_W + ARROW_W)
-            self._draw_node(nx, CY, NODE_W, NODE_H, node, idx, n)
+            # Shadow
+            self.cv.create_rectangle(
+                nx+3, cy-NH//2+3, nx+NW+3, cy+NH//2+3,
+                fill="#000000", outline="")
 
-            # Arrow to next node
-            if idx < n - 1:
-                ax = nx + NODE_W
-                ay = CY
-                ex = ax + ARROW_W
-                self.canvas.create_line(
-                    ax, ay, ex, ay,
-                    fill=COL_ARROW, width=2, arrow=tk.LAST
-                )
-                self.canvas.create_text(
-                    ax + ARROW_W // 2, ay - 10,
-                    text="next", font=self.f_ptr, fill=COL_ARROW
-                )
+            # Box
+            outline_col = COL_GW if is_gw else "white"
+            self.cv.create_rectangle(
+                nx, cy-NH//2, nx+NW, cy+NH//2,
+                fill=col, outline=outline_col, width=2)
 
-        # NULL terminators on far left / far right
-        lx = START_X - 2
-        self.canvas.create_text(lx, CY, text="NULL",
-                                font=self.f_ptr, fill=COL_DIM, anchor="e")
-        rx = START_X + TOTAL_W + 2
-        self.canvas.create_text(rx, CY, text="NULL",
-                                font=self.f_ptr, fill=COL_DIM, anchor="w")
+            cx = nx + NW // 2
 
-    def _draw_node(self, nx: int, cy: int, nw: int, nh: int,
-                   node: CoachNode, idx: int, total: int):
-        """Draw a single coach node box."""
-        top  = cy - nh // 2
-        bot  = cy + nh // 2
-        col  = node.color
+            # ID label
+            label = f"C{node.coach_id}" + (" GW" if is_gw else "")
+            self.cv.create_text(cx, cy - NH//2 + 12,
+                text=label, font=self.f_id, fill=COL_DK)
 
-        # Shadow
-        self.canvas.create_rectangle(
-            nx + 3, top + 3, nx + nw + 3, bot + 3,
-            fill="#000000", outline=""
-        )
+            # Divider
+            self.cv.create_line(
+                nx+4, cy-NH//2+22, nx+NW-4, cy-NH//2+22,
+                fill=COL_DK)
 
-        # Main box
-        self.canvas.create_rectangle(
-            nx, top, nx + nw, bot,
-            fill=col, outline="white", width=2
-        )
+            # Temperature (big)
+            self.cv.create_text(cx, cy - 6,
+                text=node.temp_str, font=self.f_temp, fill=COL_DK)
 
-        cx = nx + nw // 2   # centre-x of node
+            # Status text
+            self.cv.create_text(cx, cy + NH//2 - 22,
+                text=node.status, font=self.f_status, fill=COL_DK)
 
-        # Coach ID label
-        self.canvas.create_text(
-            cx, top + 14,
-            text=f"C{node.coach_id}",
-            font=self.f_id, fill=COL_TEXT_DK
-        )
+            # Pointer labels  ←left   right→
+            l_lbl = f"←{node.left_id}"  if node.left_id  >= 0 else "←NULL"
+            r_lbl = f"{node.right_id}→" if node.right_id >= 0 else "NULL→"
+            self.cv.create_text(nx + 4, cy + NH//2 - 9,
+                text=l_lbl, font=self.f_ptr, fill="#333344", anchor="w")
+            self.cv.create_text(nx + NW - 4, cy + NH//2 - 9,
+                text=r_lbl, font=self.f_ptr, fill="#333344", anchor="e")
 
-        # Divider line
-        self.canvas.create_line(
-            nx + 4, top + 26, nx + nw - 4, top + 26,
-            fill=COL_TEXT_DK, width=1
-        )
+            # Arrow  →  to next node
+            if i < n - 1:
+                ax = nx + NW
+                ex = ax + GAP
+                self.cv.create_line(ax, cy, ex, cy,
+                    arrow=tk.LAST, fill=COL_ARROW, width=2)
+                self.cv.create_text((ax + ex) // 2, cy - 10,
+                    text="next", font=self.f_ptr, fill=COL_ARROW)
 
-        # Temperature
-        self.canvas.create_text(
-            cx, cy - 4,
-            text=node.temp_str,
-            font=self.f_temp, fill=COL_TEXT_DK
-        )
-
-        # Status badge
-        self.canvas.create_text(
-            cx, bot - 22,
-            text=node.status,
-            font=self.f_status, fill=COL_TEXT_DK
-        )
-
-        # Pointer labels: ← prev | next →
-        prev_txt = f"←{nodes_left_id(node, idx)}"
-        next_txt = f"{nodes_right_id(node, idx, total)}→"
-        self.canvas.create_text(
-            nx + 5, bot - 8,
-            text=prev_txt, font=self.f_ptr,
-            fill="#333333", anchor="w"
-        )
-        self.canvas.create_text(
-            nx + nw - 5, bot - 8,
-            text=next_txt, font=self.f_ptr,
-            fill="#333333", anchor="e"
-        )
-
-    # ── Footer update ─────────────────────────────────────────
-    def _update_footer(self):
-        nodes = self.coaches.as_list()
+    # ── Footer alert ─────────────────────────────────────────
+    def _draw_footer(self):
+        nodes    = self.monitor.get_nodes()
         critical = [n for n in nodes if n.status == "CRITICAL"]
         warning  = [n for n in nodes if n.status == "WARNING"]
 
         if critical:
-            ids = ", ".join(f"C{n.coach_id}" for n in critical)
-            txt = f"⚠  CRITICAL HOT AXLE — Coach(es): {ids}"
+            ids = " ".join(f"C{n.coach_id}" for n in critical)
+            txt = f"⚠  CRITICAL HOT AXLE — {ids}"
             fg  = COL_CRIT
         elif warning:
-            ids = ", ".join(f"C{n.coach_id}" for n in warning)
-            txt = f"⚠  Warning — Coach(es): {ids} temperature elevated"
-            fg  = COL_WARNING
+            ids = " ".join(f"C{n.coach_id}" for n in warning)
+            txt = f"⚠  Warning — {ids} elevated"
+            fg  = COL_WARN
         elif nodes:
-            txt = f"✔  All {len(nodes)} coach(es) normal — No hot axle detected"
+            active = " → ".join(f"C{n.coach_id}" for n in nodes)
+            txt = f"✔  All normal  |  {active}"
             fg  = COL_NORMAL
         else:
-            txt = f"   {self.sys_status}"
+            txt = self.monitor.status_msg
             fg  = COL_DIM
 
-        self.lbl_status.config(text=txt, fg=fg)
+        self.lbl_alert.config(text=txt, fg=fg)
 
-    # ── Run ──────────────────────────────────────────────────
     def run(self):
         self.root.mainloop()
-
-
-# ── Pointer label helpers ─────────────────────────────────────
-def nodes_left_id(node: CoachNode, idx: int) -> str:
-    """Label for the left/prev pointer of this node in the list."""
-    return "NULL" if idx == 0 else f"C{node.coach_id - 1}"
-
-def nodes_right_id(node: CoachNode, idx: int, total: int) -> str:
-    """Label for the right/next pointer of this node in the list."""
-    return "NULL" if idx == total - 1 else f"C{node.coach_id + 1}"
 
 
 # ── Entry point ──────────────────────────────────────────────
 if __name__ == "__main__":
     port = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_PORT
 
-    if not os.path.exists(port):
-        print(f"[WARN] Serial port {port} not found — continuing anyway")
-
-    print("=" * 52)
-    print("  HOT AXLE MONITORING SYSTEM  —  Raspberry Pi")
-    print("=" * 52)
-    print(f"  Display : 480×320 SPI TFT (ILI9486)")
+    print("=" * 50)
+    print("  HOT AXLE MONITOR — Raspberry Pi")
     print(f"  Port    : {port}  @  {BAUDRATE} baud")
-    print(f"  Coaches : up to 5  (IDs 1–5, auto-sorted)")
-    print("=" * 52)
+    print(f"  Coaches : C0–C4 (missing ones auto-skipped)")
+    print(f"  Display : 480×320 SPI TFT")
+    print("=" * 50)
 
-    app = HotAxleApp(port)
-    app.run()
+    monitor = TrainMonitor(port)
+    monitor.start()
+
+    gui = HotAxleGUI(monitor)
+    gui.run()
