@@ -100,7 +100,7 @@ class TrainMonitor:
     
     def send_command(self, command):
         """Send command and get response with robust error handling"""
-        max_retries = 2
+        max_retries = 3
         
         for attempt in range(max_retries):
             try:
@@ -109,34 +109,33 @@ class TrainMonitor:
                     print(f"  Serial port closed, attempting reconnect...")
                     return None
                 
-                # Flush buffers
+                # Flush stale input before request
                 self.serial_port.reset_input_buffer()
-                self.serial_port.reset_output_buffer()
                 
                 # Send command
                 cmd_bytes = f"{command}\n".encode('utf-8')
                 self.serial_port.write(cmd_bytes)
                 self.serial_port.flush()
                 
-                # Wait for response with shorter timeout
-                time.sleep(0.25)  # Faster response
-                
-                if self.serial_port.in_waiting:
-                    # Read response with error handling
-                    response = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
-                    
-                    if response and response != "ERROR":
-                        return response
-                    elif response == "ERROR":
-                        if attempt < max_retries - 1:
-                            time.sleep(0.1)
+                # Accept only real TEMP packets and ignore READY noise.
+                deadline = time.time() + 2.0
+                while time.time() < deadline:
+                    if self.serial_port.in_waiting:
+                        response = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+
+                        if not response or response == "READY":
                             continue
-                        return None
-                else:
-                    if attempt < max_retries - 1:
-                        time.sleep(0.1)
-                        continue
-                    return None
+                        if response == "ERROR":
+                            break
+                        if response.startswith("TEMP,"):
+                            return response
+
+                    time.sleep(0.03)
+
+                if attempt < max_retries - 1:
+                    time.sleep(0.15)
+                    continue
+                return None
                     
             except (OSError, IOError) as e:
                 # I/O error - serial connection issue
@@ -162,12 +161,12 @@ class TrainMonitor:
         
         self.detected_coaches.clear()
         
-        # Try to detect C0, C1, C2, C3
+        # Current setup: C0, C1, C2, C3
         for coach_id in [0, 1, 2, 3]:
             print(f"Probing Coach {coach_id}...", end=" ")
             response = self.send_command(f"TEMP,{coach_id}")
             
-            if response and response != "ERROR":
+            if response and response.startswith("TEMP,"):
                 self.detected_coaches.add(coach_id)
                 print(f"✓ DETECTED")
             else:
@@ -353,8 +352,8 @@ class TrainMonitor:
                 if response and response != "ERROR":
                     try:
                         parts = response.split(',')
-                        if len(parts) >= 4:
-                            temp = float(parts[3])
+                        if len(parts) >= 5:
+                            temp = float(parts[4])
                             self.coaches[coach_id].temperature = temp
                             print(f"✓ C{coach_id}: {temp:.1f}°C")
                         else:
