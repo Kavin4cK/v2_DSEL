@@ -162,8 +162,8 @@ class TrainMonitor:
 
         self.detected_coaches.clear()
 
-        # Try to detect C0, C1, C2, C3
-        for coach_id in [0, 1, 2, 3]:
+        # Try to detect C0, C1, C2, C3, C4
+        for coach_id in [0, 1, 2, 3, 4]:
             print(f"Probing Coach {coach_id}...", end=" ")
             response = self.send_command(f"TEMP,{coach_id}")
 
@@ -353,8 +353,8 @@ class TrainMonitor:
                 if response and response != "ERROR":
                     try:
                         parts = response.split(',')
-                        if len(parts) >= 4:
-                            temp = float(parts[3])
+                        if len(parts) >= 5:
+                            temp = float(parts[4])
                             self.coaches[coach_id].temperature = temp
                             print(f"✓ C{coach_id}: {temp:.1f}°C")
                         else:
@@ -704,3 +704,4 @@ if __name__ == "__main__":
         port = sys.argv[1]
 
     monitor = TrainMonitor(port=port, baudrate=9600)
+    monitor.run()
