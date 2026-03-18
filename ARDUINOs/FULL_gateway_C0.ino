@@ -33,6 +33,32 @@ const int IRIGHT[] = { 1,  2,  3,  4, -1};
 String cmd           = "";
 bool   handshakeDone = false;
 
+bool readCoachTempI2C(uint8_t id, float &tempOut) {
+  uint8_t addr = id + 8;
+
+  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+    uint8_t got = Wire.requestFrom(addr, (uint8_t)5);
+    if (got == 5) {
+      uint8_t rid = Wire.read();
+      uint8_t b[4];
+      for (int i = 0; i < 4; i++) b[i] = Wire.read();
+
+      float t;
+      memcpy(&t, b, 4);
+
+      if (rid == id && !isnan(t) && t >= -100.0 && t <= 200.0) {
+        tempOut = t;
+        return true;
+      }
+    }
+
+    while (Wire.available()) Wire.read();
+    delay(8);
+  }
+
+  return false;
+}
+
 void handleTemp(int id) {
   // C0 — own sensor
   if (id == 0) {
@@ -49,23 +75,8 @@ void handleTemp(int id) {
   }
 
   // C1-C4 — I2C
-  uint8_t addr = id + 8;
-  uint8_t got  = Wire.requestFrom(addr, (uint8_t)5);
-
-  if (got < 5) {
-    while (Wire.available()) Wire.read();
-    Serial.println(F("ERROR"));
-    Serial.flush();
-    return;
-  }
-
-  uint8_t rid = Wire.read();
-  uint8_t b[4];
-  for (int i = 0; i < 4; i++) b[i] = Wire.read();
-  float t;
-  memcpy(&t, b, 4);
-
-  if (rid != (uint8_t)id || isnan(t) || t < -100.0 || t > 200.0) {
+  float t = 0.0;
+  if (!readCoachTempI2C((uint8_t)id, t)) {
     Serial.println(F("ERROR"));
     Serial.flush();
     return;
@@ -85,7 +96,7 @@ void handleTemp(int id) {
 void setup() {
   Serial.begin(9600);
   Wire.begin();
-  Wire.setClock(100000);
+  Wire.setClock(50000);
   sensors.begin();
   sensors.setResolution(12);
   delay(2000);
