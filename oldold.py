@@ -98,59 +98,46 @@ class TrainMonitor:
             print(f"✗ Connection failed: {e}")
             return False
     
-    def send_command(self, command):
-        """Send command and get response with robust error handling"""
-        max_retries = 3
-        
-        for attempt in range(max_retries):
-            try:
-                # Check if port is still open
-                if not self.serial_port or not self.serial_port.is_open:
-                    print(f"  Serial port closed, attempting reconnect...")
-                    return None
-                
-                # Flush stale input before request
-                self.serial_port.reset_input_buffer()
-                
-                # Send command
-                cmd_bytes = f"{command}\n".encode('utf-8')
-                self.serial_port.write(cmd_bytes)
-                self.serial_port.flush()
-                
-                # Accept only real TEMP packets and ignore READY noise.
-                deadline = time.time() + 2.0
-                while time.time() < deadline:
-                    if self.serial_port.in_waiting:
-                        response = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+    def send_command(self, command, expected_id=None, timeout_s=2.5):
+        """Send one command and wait for a matching TEMP response."""
+        try:
+            if not self.serial_port or not self.serial_port.is_open:
+                print("  Serial port closed")
+                return None
 
-                        if not response or response == "READY":
-                            continue
-                        if response == "ERROR":
-                            break
-                        if response.startswith("TEMP,"):
-                            return response
+            self.serial_port.reset_input_buffer()
+            self.serial_port.write(f"{command}\n".encode('utf-8'))
+            self.serial_port.flush()
 
+            deadline = time.time() + timeout_s
+            while time.time() < deadline:
+                if not self.serial_port.in_waiting:
                     time.sleep(0.03)
+                    continue
 
-                if attempt < max_retries - 1:
-                    time.sleep(0.15)
+                response = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+                if not response or response == "READY":
                     continue
-                return None
-                    
-            except (OSError, IOError) as e:
-                # I/O error - serial connection issue
-                print(f"  I/O Error: {e}")
-                return None
-            except UnicodeDecodeError as e:
-                if attempt < max_retries - 1:
-                    time.sleep(0.1)
+                if response == "ERROR":
+                    return None
+                if not response.startswith("TEMP,"):
                     continue
-                return None
-            except Exception as e:
-                print(f"  Unexpected error: {type(e).__name__}: {e}")
-                return None
-        
-        return None
+
+                parsed = self.parse_temp_response(response)
+                if not parsed:
+                    continue
+                if expected_id is not None and parsed["coach_id"] != expected_id:
+                    # Ignore delayed responses for other coaches.
+                    continue
+                return response
+
+            return None
+        except (OSError, IOError) as e:
+            print(f"  I/O Error: {e}")
+            return None
+        except Exception as e:
+            print(f"  Unexpected error: {type(e).__name__}: {e}")
+            return None
 
     def parse_temp_response(self, response):
         """Parse TEMP packets from different gateway firmware formats."""
@@ -198,20 +185,12 @@ class TrainMonitor:
         # Current setup: C0, C1, C2, C3
         for coach_id in [0, 1, 2, 3]:
             print(f"Probing Coach {coach_id}...", end=" ")
-            detected = False
+            response = self.send_command(f"TEMP,{coach_id}", expected_id=coach_id, timeout_s=3.0)
+            parsed = self.parse_temp_response(response) if response else None
 
-            for _ in range(3):
-                response = self.send_command(f"TEMP,{coach_id}")
-                parsed = self.parse_temp_response(response) if response else None
-
-                if parsed and parsed["coach_id"] == coach_id:
-                    self.detected_coaches.add(coach_id)
-                    detected = True
-                    break
-                time.sleep(0.1)
-
-            if detected:
+            if parsed and parsed["coach_id"] == coach_id:
                 print(f"✓ DETECTED")
+                self.detected_coaches.add(coach_id)
             else:
                 print(f"✗ Not found")
         
@@ -390,7 +369,7 @@ class TrainMonitor:
         """Continuously update temperatures from all coaches"""
         for coach_id in self.train_order:
             try:
-                response = self.send_command(f"TEMP,{coach_id}")
+                response = self.send_command(f"TEMP,{coach_id}", expected_id=coach_id, timeout_s=2.0)
                 parsed = self.parse_temp_response(response) if response else None
 
                 if parsed and parsed["coach_id"] == coach_id:

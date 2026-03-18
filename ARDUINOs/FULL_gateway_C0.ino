@@ -53,6 +53,13 @@ bool readCoachTempI2C(uint8_t id, float &tempOut) {
     }
 
     while (Wire.available()) Wire.read();
+
+    // Recover bus state after a failed attempt.
+    Wire.end();
+    delay(2);
+    Wire.begin();
+    Wire.setClock(50000);
+
     delay(8);
   }
 
