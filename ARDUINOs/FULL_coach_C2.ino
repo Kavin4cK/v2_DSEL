@@ -44,11 +44,7 @@ void setup() {
   sensors.setWaitForConversion(true);
   sensors.requestTemperatures();
   float t = sensors.getTempCByIndex(0);
-  if (t != DEVICE_DISCONNECTED_C && t > -100.0) {
-    noInterrupts();
-    currentTemp = t;
-    interrupts();
-  }
+  if (t != DEVICE_DISCONNECTED_C && t > -100.0) currentTemp = t;
   sensors.setWaitForConversion(false);
   lastRead = millis();
 
@@ -68,11 +64,7 @@ void loop() {
 
   if (convStarted && now - convAt >= 850) {
     float t = sensors.getTempCByIndex(0);
-    if (t != DEVICE_DISCONNECTED_C && t > -100.0) {
-      noInterrupts();
-      currentTemp = t;
-      interrupts();
-    }
+    if (t != DEVICE_DISCONNECTED_C && t > -100.0) currentTemp = t;
     lastRead    = now;
     convStarted = false;
   }

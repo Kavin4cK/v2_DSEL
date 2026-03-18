@@ -81,7 +81,7 @@ class TrainMonitor:
             print(f"Connection failed: {exc}")
             return False
 
-    def send_command(self, command):
+    def send_command(self, command, timeout_s=1.2):
         """Send command and return non-error response line."""
         max_retries = 3
         for attempt in range(max_retries):
@@ -94,7 +94,7 @@ class TrainMonitor:
                 self.serial_port.flush()
 
                 # Gateway may take longer when it probes neighbors over I2C.
-                deadline = time.time() + 1.2
+                deadline = time.time() + timeout_s
                 while time.time() < deadline:
                     if self.serial_port.in_waiting:
                         line = self.serial_port.readline().decode("utf-8", errors="ignore").strip()
@@ -149,7 +149,7 @@ class TrainMonitor:
 
         for coach_id in range(5):
             print(f"Probing C{coach_id}... ", end="", flush=True)
-            response = self.send_command(f"TEMP,{coach_id}")
+            response = self.send_command(f"TEMP,{coach_id}", timeout_s=2.5)
             parsed = self.parse_temp_response(response) if response else None
 
             if parsed:
@@ -210,7 +210,7 @@ class TrainMonitor:
     def update_temperatures(self):
         """Poll every detected coach and refresh temperatures."""
         for coach_id in self.train_order:
-            response = self.send_command(f"TEMP,{coach_id}")
+            response = self.send_command(f"TEMP,{coach_id}", timeout_s=1.5)
             parsed = self.parse_temp_response(response) if response else None
             if not parsed:
                 self.coaches[coach_id].temperature = None

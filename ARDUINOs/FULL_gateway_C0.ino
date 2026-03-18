@@ -13,9 +13,9 @@
  * Reply fail: ERROR
  * Boot      : READY (sent every second until Pi connects)
  *
- * Topology reporting:
- *   left/right neighbors are resolved dynamically from detected coaches.
- *   Missing coach queries return ERROR and Pi skips them.
+ * Topology supported:
+ *   C0-C1-C3-C4  or  C0-C1-C2-C3-C4
+ *   (any missing coach returns ERROR, Pi skips it)
  */
 #include <Wire.h>
 #include <OneWire.h>
@@ -26,49 +26,14 @@
 OneWire           oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
-bool isCoachPresent(int id) {
-  if (id == 0) return true;
-  if (id < 1 || id > 4) return false;
-
-  uint8_t addr = id + 8;
-  uint8_t got  = Wire.requestFrom(addr, (uint8_t)1);
-  if (got < 1) {
-    while (Wire.available()) Wire.read();
-    return false;
-  }
-
-  uint8_t rid = Wire.read();
-  while (Wire.available()) Wire.read();
-  return rid == (uint8_t)id;
-}
-
-void resolveNeighbors(int id, int &left, int &right) {
-  left = -1;
-  right = -1;
-
-  for (int i = id - 1; i >= 0; i--) {
-    if (isCoachPresent(i)) {
-      left = i;
-      break;
-    }
-  }
-
-  for (int i = id + 1; i <= 4; i++) {
-    if (isCoachPresent(i)) {
-      right = i;
-      break;
-    }
-  }
-}
+// Hardcoded neighbours
+const int ILEFT[]  = {-1, -1,  1,  2,  3};
+const int IRIGHT[] = { 1,  2,  3,  4, -1};
 
 String cmd           = "";
 bool   handshakeDone = false;
 
 void handleTemp(int id) {
-  int left  = -1;
-  int right = -1;
-  resolveNeighbors(id, left, right);
-
   // C0 — own sensor
   if (id == 0) {
     sensors.requestTemperatures();
@@ -76,11 +41,7 @@ void handleTemp(int id) {
     if (t == DEVICE_DISCONNECTED_C || t < -100.0) {
       Serial.println(F("ERROR"));
     } else {
-      Serial.print(F("TEMP,0,"));
-      Serial.print(left);
-      Serial.print(F(","));
-      Serial.print(right);
-      Serial.print(F(","));
+      Serial.print(F("TEMP,0,-1,1,"));
       Serial.println(t, 2);
     }
     Serial.flush();
@@ -113,9 +74,9 @@ void handleTemp(int id) {
   Serial.print(F("TEMP,"));
   Serial.print(id);
   Serial.print(F(","));
-  Serial.print(left);
+  Serial.print(ILEFT[id]);
   Serial.print(F(","));
-  Serial.print(right);
+  Serial.print(IRIGHT[id]);
   Serial.print(F(","));
   Serial.println(t, 2);
   Serial.flush();
