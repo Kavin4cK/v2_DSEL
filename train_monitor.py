@@ -83,25 +83,31 @@ class TrainMonitor:
 
     def send_command(self, command):
         """Send command and return non-error response line."""
-        max_retries = 2
+        max_retries = 3
         for attempt in range(max_retries):
             try:
                 if not self.serial_port or not self.serial_port.is_open:
                     return None
 
                 self.serial_port.reset_input_buffer()
-                self.serial_port.reset_output_buffer()
                 self.serial_port.write(f"{command}\n".encode("utf-8"))
                 self.serial_port.flush()
 
-                time.sleep(0.2)
-                if self.serial_port.in_waiting:
-                    line = self.serial_port.readline().decode("utf-8", errors="ignore").strip()
-                    if line and line != "ERROR":
-                        return line
+                # Gateway may take longer when it probes neighbors over I2C.
+                deadline = time.time() + 1.2
+                while time.time() < deadline:
+                    if self.serial_port.in_waiting:
+                        line = self.serial_port.readline().decode("utf-8", errors="ignore").strip()
+                        if not line or line == "READY":
+                            continue
+                        if line == "ERROR":
+                            break
+                        if line.startswith("TEMP,"):
+                            return line
+                    time.sleep(0.03)
 
                 if attempt < (max_retries - 1):
-                    time.sleep(0.1)
+                    time.sleep(0.15)
             except Exception:
                 return None
         return None
