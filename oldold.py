@@ -151,6 +151,40 @@ class TrainMonitor:
                 return None
         
         return None
+
+    def parse_temp_response(self, response):
+        """Parse TEMP packets from different gateway firmware formats."""
+        try:
+            parts = [p.strip() for p in response.split(',')]
+            if len(parts) < 3 or parts[0] != "TEMP":
+                return None
+
+            coach_id = int(parts[1])
+
+            # Preferred format: TEMP,id,left,right,temp
+            if len(parts) >= 5:
+                left_id = int(parts[2])
+                right_id = int(parts[3])
+                temp = float(parts[4])
+            # Legacy fallback: TEMP,id,temp
+            elif len(parts) == 3:
+                left_id = -1
+                right_id = -1
+                temp = float(parts[2])
+            # Transitional fallback: TEMP,id,*,temp
+            else:
+                left_id = -1
+                right_id = -1
+                temp = float(parts[-1])
+
+            return {
+                "coach_id": coach_id,
+                "left_id": left_id,
+                "right_id": right_id,
+                "temperature": temp,
+            }
+        except (ValueError, IndexError):
+            return None
     
     def detect_coaches(self):
         """Detect which coaches are physically present"""
@@ -164,10 +198,19 @@ class TrainMonitor:
         # Current setup: C0, C1, C2, C3
         for coach_id in [0, 1, 2, 3]:
             print(f"Probing Coach {coach_id}...", end=" ")
-            response = self.send_command(f"TEMP,{coach_id}")
-            
-            if response and response.startswith("TEMP,"):
-                self.detected_coaches.add(coach_id)
+            detected = False
+
+            for _ in range(3):
+                response = self.send_command(f"TEMP,{coach_id}")
+                parsed = self.parse_temp_response(response) if response else None
+
+                if parsed and parsed["coach_id"] == coach_id:
+                    self.detected_coaches.add(coach_id)
+                    detected = True
+                    break
+                time.sleep(0.1)
+
+            if detected:
                 print(f"✓ DETECTED")
             else:
                 print(f"✗ Not found")
@@ -348,18 +391,14 @@ class TrainMonitor:
         for coach_id in self.train_order:
             try:
                 response = self.send_command(f"TEMP,{coach_id}")
-                
-                if response and response != "ERROR":
-                    try:
-                        parts = response.split(',')
-                        if len(parts) >= 5:
-                            temp = float(parts[4])
-                            self.coaches[coach_id].temperature = temp
-                            print(f"✓ C{coach_id}: {temp:.1f}°C")
-                        else:
-                            print(f"⚠ C{coach_id}: Invalid format - {response}")
-                    except (ValueError, IndexError) as e:
-                        print(f"⚠ C{coach_id}: Parse error - {e}")
+                parsed = self.parse_temp_response(response) if response else None
+
+                if parsed and parsed["coach_id"] == coach_id:
+                    self.coaches[coach_id].temperature = parsed["temperature"]
+                    if parsed["left_id"] != -1 or parsed["right_id"] != -1:
+                        self.coaches[coach_id].left_id = parsed["left_id"]
+                        self.coaches[coach_id].right_id = parsed["right_id"]
+                    print(f"✓ C{coach_id}: {parsed['temperature']:.1f}°C")
                 else:
                     print(f"⚠ C{coach_id}: No response")
             except Exception as e:
